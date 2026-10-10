@@ -446,11 +446,34 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Chat Button - always visible in room controls & fullscreen view */}
+          {onToggleChat && (
+            <button
+              onClick={onToggleChat}
+              className={`relative flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
+                isChatOpen
+                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-2 ring-sky-500/40 shadow-sky-500/20'
+                  : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 border-zinc-700/60'
+              }`}
+              title="Toggle Room Chat"
+              aria-label="Toggle Room Chat"
+            >
+              <MessageSquare className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400 shrink-0" />
+              <span className="hidden sm:inline">Chat</span>
+              {typeof unreadCount === 'number' && unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Video Call Button */}
           {!inCall && onStartCall && (
             <button
               onClick={onStartCall}
-              className={`flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg transition-all backdrop-blur-md shadow-sm shrink-0 ${
+              className={`flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
                 incomingCall
                   ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
                   : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
@@ -471,31 +494,10 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
             </button>
           )}
 
-          {/* Chat pill - hidden on mobile (<640px) to eliminate duplication with header chat icon */}
-          {onToggleChat && (
-            <button
-              onClick={onToggleChat}
-              className={`hidden sm:flex relative items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors backdrop-blur-md shadow-sm shrink-0 ${
-                isChatOpen
-                  ? 'bg-sky-950/70 text-sky-300 border-sky-600/50'
-                  : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 border-zinc-700/60'
-              }`}
-              title="Toggle Room Chat"
-            >
-              <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
-              <span>Chat</span>
-              {typeof unreadCount === 'number' && unreadCount > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold">
-                  {unreadCount}
-                </span>
-              )}
-            </button>
-          )}
-
           {/* Leave Party Button - always visible and accessible on mobile */}
           <button
             onClick={onLeave}
-            className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm shrink-0"
+            className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm shrink-0 touch-manipulation"
             title="Leave Watch Party"
             aria-label="Leave Watch Party"
           >

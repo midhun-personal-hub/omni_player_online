@@ -118,6 +118,12 @@ export type WatchPartyCommand =
       signal:
         | { type: 'description'; description: RTCSessionDescriptionInit }
         | { type: 'candidate'; candidate: RTCIceCandidateInit };
+    }
+  | {
+      type: 'stream-owner';
+      streamId: string;
+      peerId: string;
+      name: string;
     };
 
 export interface WatchPartyStateBroadcast {

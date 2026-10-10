@@ -3,7 +3,7 @@ import { getIceServers } from './watchParty';
 export interface RemoteParticipant {
   peerId: string;
   name: string;
-  stream: MediaStream;
+  stream: MediaStream | null;
   camOn: boolean;
   micOn: boolean;
   speaking: boolean;
@@ -68,6 +68,8 @@ export class CallManager {
 
   // Known roster: peerId -> name
   private roster: Map<string, string> = new Map();
+  // Resolved peer display names: peerId -> name
+  private peerNames: Map<string, string> = new Map();
 
   // Audio Context & Analysers for speaking detection
   private audioCtx: AudioContext | null = null;
@@ -93,46 +95,149 @@ export class CallManager {
     this.callbacks = callbacks;
   }
 
-  public setPeerInfo(myPeerId: string | null, myName: string, isPolite: boolean) {
+  private hostPeerId: string | null = null;
+  private hostDisplayName: string = 'Host';
+
+  public setPeerInfo(
+    myPeerId: string | null,
+    myName: string,
+    isPolite: boolean,
+    hostPeerId?: string,
+    hostDisplayName?: string
+  ) {
     this.myPeerId = myPeerId;
     this.myName = myName;
     this.isPolite = isPolite;
+    if (hostPeerId) {
+      this.hostPeerId = hostPeerId;
+    }
+    if (hostDisplayName) {
+      this.hostDisplayName = hostDisplayName;
+    }
+
+    // Always prune any accidental local user record from remote participants
+    this.pruneLocalUser();
+  }
+
+  public isLocalUser(peerId: string): boolean {
+    if (!peerId) return false;
+    if (this.myPeerId && (peerId === this.myPeerId || peerId === this.canonicalizePeerId(this.myPeerId))) {
+      return true;
+    }
+    // Impolite peer is the Host. Any reference to 'host' or hostPeerId is the local user
+    if (!this.isPolite) {
+      if (peerId === 'host') return true;
+      if (this.hostPeerId && peerId === this.hostPeerId) return true;
+    }
+    return false;
+  }
+
+  public canonicalizePeerId(peerId: string): string {
+    if (!peerId) return peerId;
+    if (peerId === 'host' && this.hostPeerId) return this.hostPeerId;
+    return peerId;
+  }
+
+  private pruneLocalUser() {
+    let changed = false;
+    for (const id of Array.from(this.remoteParticipants.keys())) {
+      if (this.isLocalUser(id)) {
+        this.remoteParticipants.delete(id);
+        changed = true;
+      }
+    }
+    for (const [id, entry] of this.peerConnections.entries()) {
+      if (this.isLocalUser(id)) {
+        try {
+          entry.pc.close();
+        } catch {}
+        this.peerConnections.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.notifyRemoteParticipants();
+    }
   }
 
   public setRoster(peers: Array<{ id: string; name: string }>) {
     this.roster.clear();
     for (const p of peers) {
-      this.roster.set(p.id, p.name);
-      const existing = this.remoteParticipants.get(p.id);
-      if (existing && existing.name !== p.name) {
+      const canonicalId = this.canonicalizePeerId(p.id);
+      this.roster.set(canonicalId, p.name);
+      if (p.name && p.name !== 'Host' && p.name !== 'Guest') {
+        this.peerNames.set(canonicalId, p.name);
+      } else if (!this.peerNames.has(canonicalId)) {
+        this.peerNames.set(canonicalId, p.name);
+      }
+
+      if (this.isLocalUser(p.id) || this.isLocalUser(canonicalId)) {
+        this.remoteParticipants.delete(p.id);
+        this.remoteParticipants.delete(canonicalId);
+        continue;
+      }
+
+      const existing = this.remoteParticipants.get(canonicalId) || this.remoteParticipants.get(p.id);
+      if (existing) {
+        existing.peerId = canonicalId;
         existing.name = p.name;
+        if (p.id !== canonicalId) {
+          this.remoteParticipants.delete(p.id);
+          this.remoteParticipants.set(canonicalId, existing);
+        }
       }
     }
     this.notifyRemoteParticipants();
 
     // If we are currently in call, ensure peer connections exist and tracks are attached
-    if (this.inCall && this.localStream && this.myPeerId) {
+    if (this.inCall && this.localStream) {
       for (const p of peers) {
-        if (p.id === this.myPeerId) continue;
-        const entry = this.getOrCreatePeerConnection(p.id);
+        const canonicalId = this.canonicalizePeerId(p.id);
+        if (this.isLocalUser(p.id) || this.isLocalUser(canonicalId)) continue;
+        const entry = this.getOrCreatePeerConnection(canonicalId);
         this.syncLocalTracksToConnection(entry.pc);
       }
     }
   }
 
-  public handlePeerJoined(remotePeerId: string) {
+  public handlePeerJoined(rawRemotePeerId: string, remoteName?: string) {
+    const remotePeerId = this.canonicalizePeerId(rawRemotePeerId);
+    if (!remotePeerId || this.isLocalUser(rawRemotePeerId) || this.isLocalUser(remotePeerId)) {
+      return;
+    }
+    if (remoteName) {
+      this.peerNames.set(remotePeerId, remoteName);
+      if (!this.roster.has(remotePeerId)) {
+        this.roster.set(remotePeerId, remoteName);
+      }
+    }
     if (this.inCall && this.localStream) {
       const entry = this.getOrCreatePeerConnection(remotePeerId);
       this.syncLocalTracksToConnection(entry.pc);
     }
+    this.syncRemoteParticipant(remotePeerId);
   }
 
-  public handlePeerLeft(remotePeerId: string) {
+  public handleStreamOwner(streamId: string, rawPeerId: string, name?: string) {
+    const peerId = this.canonicalizePeerId(rawPeerId);
+    if (!peerId || this.isLocalUser(peerId) || this.isLocalUser(rawPeerId)) return;
+    if (name) {
+      this.peerNames.set(peerId, name);
+    }
+    this.syncRemoteParticipant(peerId);
+  }
+
+  public handlePeerLeft(rawRemotePeerId: string) {
+    const remotePeerId = this.canonicalizePeerId(rawRemotePeerId);
     this.cleanupPeer(remotePeerId);
+    if (rawRemotePeerId !== remotePeerId) {
+      this.cleanupPeer(rawRemotePeerId);
+    }
   }
 
-  public updateParticipantMediaState(peerId: string, camOn: boolean, micOn: boolean) {
-    const participant = this.remoteParticipants.get(peerId);
+  public updateParticipantMediaState(rawPeerId: string, camOn: boolean, micOn: boolean) {
+    const peerId = this.canonicalizePeerId(rawPeerId);
+    const participant = this.remoteParticipants.get(peerId) || this.remoteParticipants.get(rawPeerId);
     if (participant) {
       participant.camOn = camOn;
       participant.micOn = micOn;
@@ -425,8 +530,16 @@ export class CallManager {
   }
 
   // --- PERFECT NEGOTIATION CONNECTION CREATION ---
-  public getOrCreatePeerConnection(remotePeerId: string): PeerConnectionEntry {
+  public getOrCreatePeerConnection(rawRemotePeerId: string): PeerConnectionEntry {
+    const remotePeerId = this.canonicalizePeerId(rawRemotePeerId);
     let entry = this.peerConnections.get(remotePeerId);
+    if (!entry && rawRemotePeerId !== remotePeerId) {
+      entry = this.peerConnections.get(rawRemotePeerId);
+      if (entry) {
+        this.peerConnections.delete(rawRemotePeerId);
+        this.peerConnections.set(remotePeerId, entry);
+      }
+    }
     if (entry) {
       return entry;
     }
@@ -498,6 +611,8 @@ export class CallManager {
         try {
           pc.restartIce();
         } catch {}
+      } else if (pc.connectionState === 'closed') {
+        this.cleanupPeer(remotePeerId);
       }
     };
 
@@ -566,24 +681,54 @@ export class CallManager {
     }, 400);
   }
 
-  private syncRemoteParticipant(remotePeerId: string) {
-    const entry = this.peerConnections.get(remotePeerId);
-    if (!entry) return;
+  private syncRemoteParticipant(rawPeerId: string) {
+    const remotePeerId = this.canonicalizePeerId(rawPeerId);
+    if (!remotePeerId || this.isLocalUser(rawPeerId) || this.isLocalUser(remotePeerId)) {
+      if (this.remoteParticipants.has(rawPeerId)) {
+        this.remoteParticipants.delete(rawPeerId);
+      }
+      if (this.remoteParticipants.has(remotePeerId)) {
+        this.remoteParticipants.delete(remotePeerId);
+      }
+      this.notifyRemoteParticipants();
+      return;
+    }
 
-    const name = this.roster.get(remotePeerId) || 'Friend';
-    const videoTracks = entry.remoteStream.getVideoTracks();
-    const audioTracks = entry.remoteStream.getAudioTracks();
+    if (rawPeerId !== remotePeerId && this.remoteParticipants.has(rawPeerId)) {
+      this.remoteParticipants.delete(rawPeerId);
+    }
 
-    const camOn = videoTracks.length > 0 && videoTracks.some((t) => t.enabled && !t.muted);
-    const micOn = audioTracks.length > 0 && audioTracks.some((t) => t.enabled && !t.muted);
+    const entry =
+      this.peerConnections.get(remotePeerId) ||
+      (rawPeerId !== remotePeerId ? this.peerConnections.get(rawPeerId) : undefined);
 
+    // Resolve name from remote participant's own record (peerNames / roster), NEVER local role or local name
+    const resolvedName =
+      this.peerNames.get(remotePeerId) ||
+      (rawPeerId !== remotePeerId ? this.peerNames.get(rawPeerId) : undefined) ||
+      this.roster.get(remotePeerId) ||
+      (this.hostPeerId && remotePeerId === this.hostPeerId ? this.hostDisplayName : 'Guest');
+
+    const stream = entry ? entry.remoteStream : null;
+    const videoTracks = stream ? stream.getVideoTracks() : [];
+    const audioTracks = stream ? stream.getAudioTracks() : [];
+
+    const camOn =
+      videoTracks.length > 0 &&
+      videoTracks.some((t) => t.enabled && !t.muted && t.readyState === 'live');
+    const micOn =
+      audioTracks.length > 0 &&
+      audioTracks.some((t) => t.enabled && !t.muted && t.readyState === 'live');
+
+    const existing = this.remoteParticipants.get(remotePeerId);
     const participant: RemoteParticipant = {
       peerId: remotePeerId,
-      name,
-      stream: entry.remoteStream,
+      name: resolvedName,
+      // Pass stream when tracks exist, otherwise null (avatar is shown)
+      stream: (camOn || micOn || videoTracks.length > 0 || audioTracks.length > 0) ? stream : null,
       camOn,
       micOn,
-      speaking: false,
+      speaking: existing?.speaking ?? false,
     };
 
     this.remoteParticipants.set(remotePeerId, participant);
@@ -681,24 +826,46 @@ export class CallManager {
     }
   }
 
-  private cleanupPeer(peerId: string) {
-    const entry = this.peerConnections.get(peerId);
+  private cleanupPeer(rawPeerId: string) {
+    const peerId = this.canonicalizePeerId(rawPeerId);
+    const entry = this.peerConnections.get(peerId) || this.peerConnections.get(rawPeerId);
     if (entry) {
       try {
         entry.pc.close();
       } catch {}
       this.peerConnections.delete(peerId);
+      this.peerConnections.delete(rawPeerId);
     }
     this.remoteParticipants.delete(peerId);
-    const analyser = this.remoteAnalysers.get(peerId);
+    this.remoteParticipants.delete(rawPeerId);
+    this.peerNames.delete(peerId);
+    this.peerNames.delete(rawPeerId);
+    const analyser = this.remoteAnalysers.get(peerId) || this.remoteAnalysers.get(rawPeerId);
     if (analyser) {
       this.remoteAnalysers.delete(peerId);
+      this.remoteAnalysers.delete(rawPeerId);
     }
     this.speechHoldTimers.delete(peerId);
+    this.speechHoldTimers.delete(rawPeerId);
     this.notifyRemoteParticipants();
   }
 
   private notifyRemoteParticipants() {
+    // Purge any local user entries before emitting
+    for (const id of Array.from(this.remoteParticipants.keys())) {
+      if (this.isLocalUser(id)) {
+        this.remoteParticipants.delete(id);
+      }
+    }
+
+    const tableRows = Array.from(this.remoteParticipants.values()).map((p) => ({
+      peerId: p.peerId,
+      name: p.name,
+      hasStream: Boolean(p.stream && p.stream.getTracks().length > 0),
+    }));
+    console.log(`[CallManager] Call participants updated (${this.remoteParticipants.size}):`);
+    console.table(tableRows);
+
     this.callbacks.onRemoteStreamsChange(new Map(this.remoteParticipants));
   }
 
@@ -965,6 +1132,16 @@ export class CallManager {
         }
       } catch {}
     }
+
+    // Close and clear all remote peer connections and remote participants
+    for (const entry of this.peerConnections.values()) {
+      try {
+        entry.pc.close();
+      } catch {}
+    }
+    this.peerConnections.clear();
+    this.remoteParticipants.clear();
+    this.callbacks.onRemoteStreamsChange(new Map());
 
     if (this.audioCtx) {
       try {

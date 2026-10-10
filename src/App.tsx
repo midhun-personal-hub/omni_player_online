@@ -272,6 +272,7 @@ export default function App() {
     setSoundEnabled: setWatchSoundEnabled,
     rename: watchRename,
     myId: watchMyId,
+    myDisplayName: watchMyDisplayName,
     // Video Call additions
     localStream: watchLocalStream,
     remoteStreams: watchRemoteStreams,
@@ -362,7 +363,7 @@ export default function App() {
         onToggleCam={watchToggleCam}
         onToggleMic={watchToggleMic}
         onEndCall={watchEndCall}
-        myName={watchRole === 'host' ? 'Host' : 'Guest'}
+        myName={watchMyDisplayName || (watchRole === 'host' ? 'Host' : 'Guest')}
         devices={watchDevices}
         onSelectDevice={watchSelectDevice}
         quality={watchCallQuality}

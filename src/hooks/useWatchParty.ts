@@ -188,6 +188,11 @@ export function useWatchParty(options?: {
     }
   }, []);
 
+  const getHostPeerId = useCallback((): string => {
+    const code = roomCode || watchPartyService.getRoomCode();
+    return code ? `omniplay-v1-${code}` : 'host';
+  }, [roomCode]);
+
   const lastHeartbeatRef = useRef<number>(Date.now());
   const isRemoteExecutingRef = useRef<boolean>(false);
 
@@ -219,18 +224,21 @@ export function useWatchParty(options?: {
       onError: (err) => setCallError(err),
       onSendSignal: (targetPeerId, signal) => {
         const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+        const hostPeerId = getHostPeerId();
+        const myPeerId = watchPartyService.getMyPeerId() || (isHost ? hostPeerId : undefined);
+        const resolvedTargetId = targetPeerId === 'host' ? hostPeerId : targetPeerId;
         if (isHost) {
-          watchPartyService.sendToPeer(targetPeerId, {
+          watchPartyService.sendToPeer(resolvedTargetId, {
             type: 'call-signal',
-            senderId: watchPartyService.getMyPeerId() || 'host',
-            targetId: targetPeerId,
+            senderId: myPeerId || hostPeerId,
+            targetId: resolvedTargetId,
             signal,
           });
         } else {
           watchPartyService.sendCommand({
             type: 'call-signal',
-            senderId: watchPartyService.getMyPeerId() || undefined,
-            targetId: targetPeerId,
+            senderId: myPeerId,
+            targetId: resolvedTargetId,
             signal,
           });
         }
@@ -241,13 +249,19 @@ export function useWatchParty(options?: {
   // Update CallManager peer identity on room / role changes
   useEffect(() => {
     if (callManagerRef.current) {
+      const isHost = role === 'host';
+      const hostPeerId = getHostPeerId();
+      const myPeerId = watchPartyService.getMyPeerId() || (isHost ? hostPeerId : null);
+      const myDisplayName = getSavedDisplayName() || (isHost ? 'Host' : 'Guest');
       callManagerRef.current.setPeerInfo(
-        watchPartyService.getMyPeerId(),
-        getSavedDisplayName() || (role === 'host' ? 'Host' : 'Guest'),
-        role !== 'host'
+        myPeerId,
+        myDisplayName,
+        !isHost,
+        hostPeerId,
+        isHost ? myDisplayName : 'Host'
       );
     }
-  }, [role, status, getSavedDisplayName]);
+  }, [role, status, getSavedDisplayName, getHostPeerId]);
 
   // Hook into roster events from watchPartyService
   useEffect(() => {
@@ -647,55 +661,59 @@ export function useWatchParty(options?: {
           setChatError((prev) => (prev === cmd.reason ? null : prev));
         }, 2500);
       } else if (cmd.type === 'media-state') {
-        // Forward if host, update callManager
+        const rawSenderId = cmd.senderId || senderPeerId;
+        const normalizedId = rawSenderId === 'host' || !rawSenderId ? getHostPeerId() : rawSenderId;
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
           watchPartyService.sendCommand({
             type: 'media-state',
-            senderId: senderPeerId,
+            senderId: normalizedId,
             camOn: cmd.camOn,
             micOn: cmd.micOn,
           });
-          callManagerRef.current?.updateParticipantMediaState(senderPeerId, cmd.camOn, cmd.micOn);
-        } else {
-          callManagerRef.current?.updateParticipantMediaState(
-            cmd.senderId || 'host',
-            cmd.camOn,
-            cmd.micOn
-          );
         }
+        callManagerRef.current?.updateParticipantMediaState(normalizedId, cmd.camOn, cmd.micOn);
       } else if (cmd.type === 'call-join' || cmd.type === 'call-started') {
-        const peerId = cmd.peerId || senderPeerId || 'host';
-        const name = (cmd as { name?: string }).name || 'Friend';
+        const hostPeerId = getHostPeerId();
+        const rawPeerId = cmd.peerId || senderPeerId;
+        const peerId = rawPeerId === 'host' || !rawPeerId ? hostPeerId : rawPeerId;
+        const name =
+          (cmd as { name?: string }).name ||
+          participantsRef.current.get(peerId) ||
+          (peerId === hostPeerId ? 'Host' : 'Guest');
 
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
           watchPartyService.sendCommand({
             type: cmd.type,
-            peerId: senderPeerId,
+            peerId,
             name,
           });
-          callManagerRef.current?.handlePeerJoined(senderPeerId);
-        } else {
-          callManagerRef.current?.handlePeerJoined(cmd.peerId || 'host');
         }
+        callManagerRef.current?.handlePeerJoined(peerId, name);
 
         if (!inCallRef.current) {
           setIncomingCall({ active: true, peerId, name });
           onToast?.(`${name} started a video call!`);
         }
       } else if (cmd.type === 'call-leave' || cmd.type === 'call-ended') {
-        const peerId = cmd.peerId || senderPeerId || 'host';
+        const hostPeerId = getHostPeerId();
+        const rawPeerId = cmd.peerId || senderPeerId;
+        const peerId = rawPeerId === 'host' || !rawPeerId ? hostPeerId : rawPeerId;
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
           watchPartyService.sendCommand({
             type: cmd.type,
-            peerId: senderPeerId,
+            peerId,
           });
-          callManagerRef.current?.handlePeerLeft(senderPeerId);
-        } else {
-          callManagerRef.current?.handlePeerLeft(cmd.peerId || 'host');
         }
+        callManagerRef.current?.handlePeerLeft(peerId);
         setIncomingCall((prev) => (prev?.peerId === peerId ? null : prev));
+      } else if (cmd.type === 'stream-owner') {
+        const hostPeerId = getHostPeerId();
+        const peerId = cmd.peerId === 'host' ? hostPeerId : cmd.peerId;
+        callManagerRef.current?.handleStreamOwner(cmd.streamId, peerId, cmd.name);
       } else if (cmd.type === 'call-signal') {
-        const senderId = cmd.senderId || senderPeerId || 'host';
+        const hostPeerId = getHostPeerId();
+        const rawSenderId = cmd.senderId || senderPeerId;
+        const senderId = rawSenderId === 'host' || !rawSenderId ? hostPeerId : rawSenderId;
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
           if (cmd.targetId && cmd.targetId !== watchPartyService.getMyPeerId()) {
             watchPartyService.sendToPeer(cmd.targetId, cmd);
@@ -923,21 +941,35 @@ export function useWatchParty(options?: {
   // Video Call Controls
   const startCall = useCallback(async () => {
     if (!callManagerRef.current) return;
-    const myName = getSavedDisplayName() || (roleRef.current === 'host' ? 'Host' : 'Guest');
+    const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+    const hostPeerId = getHostPeerId();
+    const myName = getSavedDisplayName() || (isHost ? 'Host' : 'Guest');
+    const myPeerId = watchPartyService.getMyPeerId() || (isHost ? hostPeerId : null);
+
     callManagerRef.current.setPeerInfo(
-      watchPartyService.getMyPeerId(),
+      myPeerId,
       myName,
-      roleRef.current !== 'host'
+      !isHost,
+      hostPeerId,
+      isHost ? myName : 'Host'
     );
     await callManagerRef.current.startCall();
     setIncomingCall(null);
     watchPartyService.sendCommand({
       type: 'call-started',
-      peerId: watchPartyService.getMyPeerId() || undefined,
+      peerId: myPeerId || undefined,
       name: myName,
     });
-    watchPartyService.sendCommand({ type: 'call-join' });
-  }, [getSavedDisplayName]);
+    const local = callManagerRef.current.getLocalStream();
+    if (local && myPeerId) {
+      watchPartyService.sendCommand({
+        type: 'stream-owner',
+        streamId: local.id,
+        peerId: myPeerId,
+        name: myName,
+      });
+    }
+  }, [getSavedDisplayName, getHostPeerId]);
 
   const endCall = useCallback(() => {
     if (!callManagerRef.current) return;
@@ -1025,6 +1057,7 @@ export function useWatchParty(options?: {
     rename,
     myId: myClientIdRef.current,
     myClientId: myClientIdRef.current,
+    myDisplayName: getSavedDisplayName() || (role === 'host' ? 'Host' : 'Guest'),
     // Video Call additions
     localStream,
     remoteStreams,
