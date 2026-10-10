@@ -198,7 +198,7 @@ export const CallStrip: React.FC<CallStripProps> = ({
   // If Hidden: Show compact floating button to reopen
   if (isHidden) {
     return (
-      <div className="absolute top-4 right-4 z-40 animate-in fade-in zoom-in-95 duration-150">
+      <div className="absolute top-16 right-4 z-[100] animate-in fade-in zoom-in-95 duration-150">
         <button
           onClick={() => {
             setIsHidden(false);
@@ -218,7 +218,7 @@ export const CallStrip: React.FC<CallStripProps> = ({
   // If Minimized: Show sleek floating pill
   if (isMinimized) {
     return (
-      <div className="absolute top-4 right-4 z-40 animate-in fade-in zoom-in-95 duration-150">
+      <div className="absolute top-16 right-4 z-[100] animate-in fade-in zoom-in-95 duration-150">
         <div className="flex items-center gap-1.5 p-1.5 bg-zinc-950/90 border border-zinc-800/90 backdrop-blur-md rounded-2xl shadow-2xl text-xs text-white">
           <div className="flex items-center gap-1.5 px-2 py-1 bg-zinc-900/80 rounded-xl font-medium">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -288,7 +288,7 @@ export const CallStrip: React.FC<CallStripProps> = ({
   }
 
   return (
-    <div className="absolute top-4 right-4 z-40 max-w-full animate-in fade-in slide-in-from-top-2 duration-200">
+    <div className="absolute top-16 right-4 z-[100] max-w-full animate-in fade-in slide-in-from-top-2 duration-200">
       <div className="bg-zinc-950/90 border border-zinc-800/90 backdrop-blur-md rounded-2xl p-2.5 shadow-2xl flex flex-col gap-2">
         {/* Strip Header Bar */}
         <div className="flex items-center justify-between gap-3 px-1 pb-1 border-b border-zinc-800/60">
