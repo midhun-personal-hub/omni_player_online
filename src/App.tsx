@@ -34,7 +34,6 @@ import { EmptyState } from './components/EmptyState';
 import { VideoPlayer } from './components/VideoPlayer';
 import { PlaylistDrawer } from './components/PlaylistDrawer';
 import { BookmarksDrawer } from './components/BookmarksDrawer';
-import { RoomBar } from './components/RoomBar';
 import { EffectsModal } from './components/EffectsModal';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { MediaInfoModal } from './components/MediaInfoModal';
@@ -504,6 +503,51 @@ export default function App() {
             )}
           </button>
 
+          {/* Room Chat Button - Desktop only */}
+          {watchRole !== null && (
+            <button
+              onClick={() => setWatchChatOpen(!watchIsChatOpen)}
+              className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 ${
+                watchIsChatOpen
+                  ? 'bg-sky-950/70 text-sky-300 border-sky-600/50'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
+              }`}
+              title="Toggle Room Chat"
+              aria-label="Toggle Room Chat"
+            >
+              <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+              <span>Chat</span>
+              {watchUnreadCount > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
+                  {watchUnreadCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {/* Video Call Button - Desktop only */}
+          {watchRole !== null && !watchInCall && (
+            <button
+              onClick={watchStartCall}
+              className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all shadow-xs shrink-0 ${
+                watchIncomingCall
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
+                  : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+              }`}
+              title={
+                watchIncomingCall
+                  ? `${watchIncomingCall.name} is calling! Click to join`
+                  : 'Join Live Video & Voice Call'
+              }
+              aria-label={watchIncomingCall ? 'Incoming Call - Join' : 'Join Call'}
+            >
+              <Video
+                className={`w-3.5 h-3.5 ${watchIncomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
+              />
+              <span>{watchIncomingCall ? 'Incoming Call - Join' : 'Join Call'}</span>
+            </button>
+          )}
+
           {/* Open Files - Hidden input (always mounted outside dropdown) */}
           <input
             type="file"
@@ -636,58 +680,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Normal flow Room Bar when in room (lobby / empty state) */}
-      {watchRole !== null && (playlist.length === 0 || !currentMedia || watchRole === 'guest') && (
-        <RoomBar
-          roomCode={watchRoomCode || ''}
-          isChatOpen={watchIsChatOpen}
-          onToggleChat={() => setWatchChatOpen(!watchIsChatOpen)}
-          unreadCount={watchUnreadCount}
-          inCall={watchInCall}
-          incomingCall={watchIncomingCall}
-          onStartCall={watchStartCall}
-          onLeave={watchLeaveRoom}
-        />
-      )}
-
-      {/* Incoming Call Alert Banner in normal document flow below room bar */}
-      {watchRole !== null && watchIncomingCall && !watchInCall && (
-        <aside
-          role="status"
-          aria-label="Incoming video call"
-          className="relative z-20 mx-3 sm:mx-4 mt-2 flex items-center justify-between gap-3 p-3 bg-zinc-900/90 border border-emerald-500/60 rounded-xl shadow-lg backdrop-blur-md animate-in slide-in-from-top duration-200"
-        >
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
-              <span className="absolute w-full h-full rounded-full bg-emerald-400/40 animate-ping" />
-              <Video className="w-4 h-4 text-emerald-400" />
-            </div>
-            <div className="text-xs min-w-0">
-              <p className="font-semibold text-white truncate">
-                {watchIncomingCall.name} started a video call
-              </p>
-              <p className="text-[11px] text-zinc-400 truncate">Join to chat with camera & microphone</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              onClick={watchStartCall}
-              className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-emerald-950/40 min-h-[36px]"
-            >
-              <Video className="w-3.5 h-3.5" />
-              <span>Join</span>
-            </button>
-            <button
-              onClick={watchDismissIncomingCall}
-              className="p-1.5 text-zinc-400 hover:text-zinc-200 rounded-lg hover:bg-zinc-800 transition-colors min-w-[36px] min-h-[36px] flex items-center justify-center"
-              title="Dismiss banner"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </aside>
-      )}
-
       {/* Mobile Dropdown Menu rendered via portal to document.body (immune to any header overflow/clipping) */}
       {isMobileMenuOpen &&
         typeof document !== 'undefined' &&
@@ -809,6 +801,44 @@ export default function App() {
           </div>,
           document.body
         )}
+
+      {/* Incoming Call Alert Banner */}
+      {watchRole !== null && watchIncomingCall && !watchInCall && (
+        <aside
+          role="status"
+          aria-label="Incoming video call"
+          className="fixed top-16 right-3 left-3 sm:left-auto sm:right-4 sm:max-w-md z-50 flex items-center justify-between gap-3 p-3 bg-zinc-950/95 border border-emerald-500/70 rounded-2xl shadow-2xl backdrop-blur-md animate-in slide-in-from-top duration-200"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+              <span className="absolute w-full h-full rounded-full bg-emerald-400/40 animate-ping" />
+              <Video className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div className="text-xs min-w-0">
+              <p className="font-semibold text-white truncate">
+                {watchIncomingCall.name} started a video call
+              </p>
+              <p className="text-[11px] text-zinc-400 truncate">Join to chat with camera & microphone</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={watchStartCall}
+              className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-emerald-950/40 min-h-[36px]"
+            >
+              <Video className="w-3.5 h-3.5" />
+              <span>Join</span>
+            </button>
+            <button
+              onClick={watchDismissIncomingCall}
+              className="p-1.5 text-zinc-400 hover:text-zinc-200 rounded-lg hover:bg-zinc-800 transition-colors min-w-[36px] min-h-[36px] flex items-center justify-center"
+              title="Dismiss banner"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </aside>
+      )}
 
       {/* Main Player Display Area */}
       <main className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">

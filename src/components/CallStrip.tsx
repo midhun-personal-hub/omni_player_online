@@ -192,60 +192,19 @@ export const CallStrip: React.FC<CallStripProps> = ({
     } catch {}
   };
 
-  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
-  const [isDragging, setIsDragging] = useState<boolean>(false);
-  const dragRef = useRef<{ startX: number; startY: number; posX: number; posY: number }>({
-    startX: 0,
-    startY: 0,
-    posX: 0,
-    posY: 0,
-  });
-
-  const handlePointerDown = (e: React.PointerEvent) => {
-    // Only drag from header or pill container background
-    setIsDragging(true);
-    dragRef.current = {
-      startX: e.clientX,
-      startY: e.clientY,
-      posX: position?.x ?? 0,
-      posY: position?.y ?? 0,
-    };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!isDragging) return;
-    const dx = e.clientX - dragRef.current.startX;
-    const dy = e.clientY - dragRef.current.startY;
-    setPosition({
-      x: dragRef.current.posX + dx,
-      y: dragRef.current.posY + dy,
-    });
-  };
-
-  const handlePointerUp = (e: React.PointerEvent) => {
-    if (!isDragging) return;
-    setIsDragging(false);
-    try {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    } catch {}
-  };
-
-  const stylePos = position ? { transform: `translate(${position.x}px, ${position.y}px)` } : undefined;
-
   const participantCount = remoteStreams.size + 1;
   const selfInitial = myName.charAt(0).toUpperCase();
 
   // If Hidden: Show compact floating button to reopen
   if (isHidden) {
     return (
-      <div className="absolute top-4 right-4 z-50 animate-in fade-in zoom-in-95 duration-150">
+      <div className="absolute top-4 right-4 z-40 animate-in fade-in zoom-in-95 duration-150">
         <button
           onClick={() => {
             setIsHidden(false);
             setIsMinimized(false);
           }}
-          className="flex items-center gap-2 px-3 py-1.5 bg-zinc-950/95 hover:bg-zinc-900 border border-emerald-500/50 backdrop-blur-md rounded-2xl shadow-2xl text-xs text-white transition-all group cursor-pointer touch-none select-none"
+          className="flex items-center gap-2 px-3 py-1.5 bg-zinc-950/95 hover:bg-zinc-900 border border-emerald-500/50 backdrop-blur-md rounded-2xl shadow-2xl text-xs text-white transition-all group"
           title="Click to show video call"
         >
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -259,13 +218,7 @@ export const CallStrip: React.FC<CallStripProps> = ({
   // If Minimized: Show sleek floating pill
   if (isMinimized) {
     return (
-      <div
-        className="absolute top-4 right-4 z-50 animate-in fade-in zoom-in-95 duration-150 cursor-grab active:cursor-grabbing touch-none select-none"
-        style={stylePos}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-      >
+      <div className="absolute top-4 right-4 z-40 animate-in fade-in zoom-in-95 duration-150">
         <div className="flex items-center gap-1.5 p-1.5 bg-zinc-950/90 border border-zinc-800/90 backdrop-blur-md rounded-2xl shadow-2xl text-xs text-white">
           <div className="flex items-center gap-1.5 px-2 py-1 bg-zinc-900/80 rounded-xl font-medium">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -335,19 +288,11 @@ export const CallStrip: React.FC<CallStripProps> = ({
   }
 
   return (
-    <div
-      className="absolute top-4 right-4 z-50 max-w-full animate-in fade-in slide-in-from-top-2 duration-200 select-none"
-      style={stylePos}
-    >
+    <div className="absolute top-4 right-4 z-40 max-w-full animate-in fade-in slide-in-from-top-2 duration-200">
       <div className="bg-zinc-950/90 border border-zinc-800/90 backdrop-blur-md rounded-2xl p-2.5 shadow-2xl flex flex-col gap-2">
-        {/* Strip Header Bar (Draggable handle) */}
-        <div
-          className="flex items-center justify-between gap-3 px-1 pb-1 border-b border-zinc-800/60 cursor-grab active:cursor-grabbing touch-none"
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-        >
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-200 pointer-events-none">
+        {/* Strip Header Bar */}
+        <div className="flex items-center justify-between gap-3 px-1 pb-1 border-b border-zinc-800/60">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-200">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             <span>Call</span>
             <span className="text-[10px] text-zinc-500 font-mono">

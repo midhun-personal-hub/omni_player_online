@@ -78,6 +78,22 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
   const [subtitlesEnabled, setSubtitlesEnabled] = useState<boolean>(true);
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
   const hideControlsTimerRef = useRef<number | null>(null);
+  const [isShortHeight, setIsShortHeight] = useState<boolean>(window.innerHeight < 420);
+
+  useEffect(() => {
+    const handleResize = () => setIsShortHeight(window.innerHeight < 420);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    console.log('[RoomControls Render]', {
+      role: 'guest',
+      fullscreenElement: document.fullscreenElement,
+      chatOpen: isChatOpen,
+      roomCode,
+    });
+  }, [isChatOpen, roomCode]);
 
   // Check if incoming stream has video tracks
   const hasVideoTrack = incomingStream
@@ -421,89 +437,139 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
         </div>
       )}
 
-      {/* TOP HEADER BAR (Overlaid) */}
+      {/* Top Overlay Container (Guest) */}
       <div
-        className={`absolute top-0 left-0 right-0 z-30 px-3 sm:px-4 py-2 sm:py-3 bg-gradient-to-b from-black/80 to-transparent flex flex-wrap items-center justify-between gap-2 max-w-full box-border transition-opacity duration-300 ${
-          controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        className={`absolute top-0 inset-x-0 z-50 flex flex-col gap-2 p-3 sm:p-4 bg-gradient-to-b from-black/80 to-transparent transition-opacity duration-300 pointer-events-none ${
+          controlsVisible ? 'opacity-100' : 'opacity-0'
         }`}
         style={{
-          paddingTop: 'max(1.25rem, env(safe-area-inset-top, 0px))',
+          paddingTop: 'max(0.5rem, env(safe-area-inset-top, 0px))',
           paddingLeft: 'max(0.75rem, env(safe-area-inset-left, 0px))',
           paddingRight: 'max(0.75rem, env(safe-area-inset-right, 0px))',
         }}
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
       >
-        {/* Room Badge */}
-        <div className="flex items-center gap-2 min-w-0 shrink-0">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shadow-lg whitespace-nowrap">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-            <span className="hidden sm:inline">Connected to room</span>
-            <span className="font-mono font-bold text-sky-400">{roomCode}</span>
-          </div>
-          {hostState.mediaName && (
-            <span className="hidden md:inline text-xs text-zinc-400 truncate max-w-xs font-medium">
-              {hostState.mediaName}
-            </span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Chat Button - always visible in room controls & fullscreen view */}
-          {onToggleChat && (
-            <button
-              onClick={onToggleChat}
-              className={`relative flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
-                isChatOpen
-                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-2 ring-sky-500/40 shadow-sky-500/20'
-                  : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 border-zinc-700/60'
-              }`}
-              title="Toggle Room Chat"
-              aria-label="Toggle Room Chat"
-            >
-              <MessageSquare className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400 shrink-0" />
-              <span className="hidden sm:inline">Chat</span>
-              {typeof unreadCount === 'number' && unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
-                  {unreadCount}
-                </span>
+        {roomCode && !isShortHeight && (
+          <div className="flex items-center justify-between gap-2 min-w-0 pointer-events-auto">
+            <div className="flex items-center gap-2 min-w-0 shrink">
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shadow-lg whitespace-nowrap overflow-hidden">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <span className="truncate">Connected to room <span className="font-mono font-bold text-sky-400">{roomCode}</span></span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {onToggleChat && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onToggleChat(); }}
+                  className={`relative flex items-center justify-center w-10 h-10 sm:w-auto sm:h-10 sm:px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
+                    isChatOpen
+                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-2 ring-sky-500/40'
+                      : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 border-zinc-700/60'
+                  }`}
+                  title="Toggle Room Chat"
+                  aria-label="Toggle Room Chat"
+                >
+                  <MessageSquare className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400 shrink-0" />
+                  <span className="hidden sm:inline ml-1.5">Chat</span>
+                  {typeof unreadCount === 'number' && unreadCount > 0 && (
+                    <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
+                      {unreadCount}
+                    </span>
+                  )}
+                </button>
               )}
-            </button>
-          )}
+              {!inCall && onStartCall && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onStartCall(); }}
+                  className={`flex items-center justify-center w-10 h-10 sm:w-auto sm:h-10 sm:px-3 py-1.5 text-xs font-semibold rounded-lg transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
+                    incomingCall
+                      ? 'bg-emerald-500 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
+                      : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
+                  }`}
+                  title={incomingCall ? `${incomingCall.name} started a call! Click to join` : 'Join Live Video Call'}
+                >
+                  <Video className={`w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0 ${incomingCall ? 'text-zinc-950' : 'text-emerald-400'}`} />
+                  <span className="hidden sm:inline ml-1.5">{incomingCall ? 'Join Call' : 'Join Call'}</span>
+                </button>
+              )}
+              {onLeave && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onLeave(); }}
+                  className="flex items-center justify-center w-10 h-10 sm:w-auto sm:h-10 sm:px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm shrink-0 touch-manipulation"
+                  title="Leave Watch Party"
+                >
+                  <LogOut className="w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0" />
+                  <span className="hidden sm:inline ml-1.5">Leave</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
-          {/* Video Call Button */}
-          {!inCall && onStartCall && (
-            <button
-              onClick={onStartCall}
-              className={`flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
-                incomingCall
-                  ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
-                  : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
-              }`}
-              title={
-                incomingCall
-                  ? `${incomingCall.name} started a call! Click to join`
-                  : 'Join Live Video Call'
-              }
-              aria-label={incomingCall ? 'Join incoming call' : 'Join call'}
-            >
-              <Video
-                className={`w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0 ${incomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
-              />
-              <span className="hidden sm:inline">
-                {incomingCall ? 'Incoming Call - Join' : 'Join Call'}
-              </span>
-            </button>
+        {/* Row 2: Media Name Bar (or Merged Row if short height) */}
+        <div className="flex items-center justify-between gap-2 min-w-0 pointer-events-auto">
+          {isShortHeight && roomCode ? (
+            <div className="flex items-center justify-between w-full gap-2 min-w-0">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shrink-0">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                  <span className="font-mono font-bold text-sky-400">{roomCode}</span>
+                </div>
+                {onToggleChat && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onToggleChat(); }}
+                    className={`relative flex items-center justify-center w-9 h-9 rounded-lg border transition-all ${
+                      isChatOpen ? 'bg-sky-500/20 text-sky-300 border-sky-500/50' : 'bg-zinc-900/90 text-zinc-200 border-zinc-700/60'
+                    }`}
+                    title="Chat"
+                  >
+                    <MessageSquare className="w-4 h-4 text-sky-400" />
+                    {typeof unreadCount === 'number' && unreadCount > 0 && (
+                      <span className="absolute -top-1 -right-1 px-1 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[9px] font-bold">
+                        {unreadCount}
+                      </span>
+                    )}
+                  </button>
+                )}
+                {!inCall && onStartCall && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onStartCall(); }}
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                    title="Join Call"
+                  >
+                    <Video className="w-4 h-4 text-emerald-400" />
+                  </button>
+                )}
+                {onLeave && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onLeave(); }}
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                    title="Leave"
+                  >
+                    <LogOut className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {hostState.mediaName && (
+                  <span className="text-xs text-zinc-400 truncate max-w-[120px] font-medium">
+                    {hostState.mediaName}
+                  </span>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between w-full gap-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 flex-1 pr-2">
+                {hostState.mediaName && (
+                  <span className="text-xs text-zinc-400 truncate max-w-xs font-medium">
+                    {hostState.mediaName}
+                  </span>
+                )}
+              </div>
+            </div>
           )}
-
-          {/* Leave Party Button - always visible and accessible on mobile */}
-          <button
-            onClick={onLeave}
-            className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm shrink-0 touch-manipulation"
-            title="Leave Watch Party"
-            aria-label="Leave Watch Party"
-          >
-            <LogOut className="w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0" />
-            <span className="hidden sm:inline">Leave</span>
-          </button>
         </div>
       </div>
 
