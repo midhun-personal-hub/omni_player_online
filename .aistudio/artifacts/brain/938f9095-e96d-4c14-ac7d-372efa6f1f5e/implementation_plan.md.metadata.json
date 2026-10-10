@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for fixing the DraggableCallBadge dragging feature by correcting container bounds reference and pointer event handling.",
+  "updatedAt":  "2026-10-10T22:33:10.014217996Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

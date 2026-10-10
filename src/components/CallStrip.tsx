@@ -608,6 +608,11 @@ const DraggableCallBadge: React.FC<{
 
   const [isDraggingState, setIsDraggingState] = useState(false);
 
+  const getContainer = (): HTMLElement => {
+    if (!badgeRef.current) return document.body;
+    return (badgeRef.current.closest('.relative') || badgeRef.current.parentElement || document.body) as HTMLElement;
+  };
+
   const updatePositionStyle = (x: number, y: number, transition = false) => {
     if (!badgeRef.current) return;
     badgeRef.current.style.transition = transition ? 'transform 200ms ease-out' : 'none';
@@ -617,13 +622,13 @@ const DraggableCallBadge: React.FC<{
   useEffect(() => {
     const badge = badgeRef.current;
     if (!badge) return;
-    const container = badge.offsetParent as HTMLElement || badge.parentElement;
+    const container = getContainer();
     if (!container) return;
 
-    const containerWidth = container.clientWidth;
-    const containerHeight = container.clientHeight;
+    const containerWidth = container.clientWidth || window.innerWidth;
+    const containerHeight = container.clientHeight || window.innerHeight;
     const badgeWidth = badge.offsetWidth || 120;
-    const badgeHeight = badge.offsetHeight || 36;
+    const badgeHeight = badge.offsetHeight || 28;
 
     let initialX = containerWidth - badgeWidth - 16;
     let initialY = 64;
@@ -633,14 +638,14 @@ const DraggableCallBadge: React.FC<{
       if (saved) {
         const { xPct, yPct } = JSON.parse(saved);
         if (typeof xPct === 'number' && typeof yPct === 'number') {
-          initialX = xPct * (containerWidth - badgeWidth);
-          initialY = yPct * (containerHeight - badgeHeight - 98);
+          initialX = xPct * Math.max(1, containerWidth - badgeWidth - 16);
+          initialY = yPct * Math.max(1, containerHeight - badgeHeight - 80);
         }
       }
     } catch {}
 
     initialX = Math.max(8, Math.min(initialX, containerWidth - badgeWidth - 8));
-    initialY = Math.max(8, Math.min(initialY, containerHeight - badgeHeight - 98));
+    initialY = Math.max(8, Math.min(initialY, containerHeight - badgeHeight - 80));
 
     updatePositionStyle(initialX, initialY, false);
     (badge as any).__currentX = initialX;
@@ -648,16 +653,16 @@ const DraggableCallBadge: React.FC<{
 
     const handleResize = () => {
       if (!badge) return;
-      const c = badge.offsetParent as HTMLElement || badge.parentElement;
+      const c = getContainer();
       if (!c) return;
-      const cw = c.clientWidth;
-      const ch = c.clientHeight;
+      const cw = c.clientWidth || window.innerWidth;
+      const ch = c.clientHeight || window.innerHeight;
       const bw = badge.offsetWidth || 120;
-      const bh = badge.offsetHeight || 36;
+      const bh = badge.offsetHeight || 28;
       let x = (badge as any).__currentX ?? (cw - bw - 16);
       let y = (badge as any).__currentY ?? 64;
       x = Math.max(8, Math.min(x, cw - bw - 8));
-      y = Math.max(8, Math.min(y, ch - bh - 98));
+      y = Math.max(8, Math.min(y, ch - bh - 80));
       updatePositionStyle(x, y, false);
       (badge as any).__currentX = x;
       (badge as any).__currentY = y;
@@ -680,9 +685,7 @@ const DraggableCallBadge: React.FC<{
       badge.setPointerCapture(e.pointerId);
     } catch {}
 
-    const container = badge.offsetParent as HTMLElement || badge.parentElement;
-    if (!container) return;
-
+    const container = getContainer();
     const rect = badge.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
 
@@ -713,16 +716,14 @@ const DraggableCallBadge: React.FC<{
     const newY = dragRef.current.initialY + dy;
 
     const badge = badgeRef.current;
-    const container = badge.offsetParent as HTMLElement || badge.parentElement;
-    if (!container) return;
-
-    const cw = container.clientWidth;
-    const ch = container.clientHeight;
-    const bw = badge.offsetWidth;
-    const bh = badge.offsetHeight;
+    const container = getContainer();
+    const cw = container.clientWidth || window.innerWidth;
+    const ch = container.clientHeight || window.innerHeight;
+    const bw = badge.offsetWidth || 120;
+    const bh = badge.offsetHeight || 28;
 
     const clampedX = Math.max(8, Math.min(newX, cw - bw - 8));
-    const clampedY = Math.max(8, Math.min(newY, ch - bh - 98));
+    const clampedY = Math.max(8, Math.min(newY, ch - bh - 80));
 
     (badge as any).__currentX = clampedX;
     (badge as any).__currentY = clampedY;
@@ -747,21 +748,19 @@ const DraggableCallBadge: React.FC<{
       return;
     }
 
-    const container = badge.offsetParent as HTMLElement || badge.parentElement;
-    if (!container) return;
+    const container = getContainer();
+    const cw = container.clientWidth || window.innerWidth;
+    const ch = container.clientHeight || window.innerHeight;
+    const bw = badge.offsetWidth || 120;
+    const bh = badge.offsetHeight || 28;
 
-    const cw = container.clientWidth;
-    const ch = container.clientHeight;
-    const bw = badge.offsetWidth;
-    const bh = badge.offsetHeight;
-
-    let curX = (badge as any).__currentX ?? 0;
-    let curY = (badge as any).__currentY ?? 0;
+    let curX = (badge as any).__currentX ?? 8;
+    let curY = (badge as any).__currentY ?? 64;
 
     const snapLeft = 8;
-    const snapRight = cw - bw - 8;
+    const snapRight = Math.max(8, cw - bw - 8);
     const targetX = curX + bw / 2 < cw / 2 ? snapLeft : snapRight;
-    const clampedY = Math.max(8, Math.min(curY, ch - bh - 98));
+    const clampedY = Math.max(8, Math.min(curY, ch - bh - 80));
 
     (badge as any).__currentX = targetX;
     (badge as any).__currentY = clampedY;
@@ -769,8 +768,8 @@ const DraggableCallBadge: React.FC<{
     updatePositionStyle(targetX, clampedY, true);
 
     try {
-      const xPct = targetX / Math.max(1, cw - bw);
-      const yPct = clampedY / Math.max(1, ch - bh - 98);
+      const xPct = targetX / Math.max(1, cw - bw - 16);
+      const yPct = clampedY / Math.max(1, ch - bh - 80);
       localStorage.setItem('omniplay.callBadgePos', JSON.stringify({ xPct, yPct }));
     } catch {}
   };
@@ -783,7 +782,7 @@ const DraggableCallBadge: React.FC<{
   };
 
   return (
-    <div className="absolute top-0 left-0 z-[100] pointer-events-none">
+    <div className="absolute inset-0 z-[100] pointer-events-none overflow-hidden">
       <button
         ref={badgeRef}
         onPointerDown={handlePointerDown}
@@ -797,7 +796,7 @@ const DraggableCallBadge: React.FC<{
           }
         }}
         onKeyDown={handleKeyDown}
-        className={`pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 bg-zinc-950/85 hover:bg-zinc-900 border border-emerald-500/50 backdrop-blur-md rounded-full sm:rounded-2xl shadow-xl text-xs text-white transition-opacity duration-150 select-none touch-none ${
+        className={`pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 bg-zinc-950/85 hover:bg-zinc-900 border border-emerald-500/50 backdrop-blur-md rounded-full sm:rounded-2xl shadow-xl text-xs text-white transition-opacity duration-150 select-none touch-none absolute top-0 left-0 ${
           isDraggingState ? 'opacity-100 ring-2 ring-emerald-400/50 scale-105' : 'opacity-85 hover:opacity-100'
         }`}
         style={{ touchAction: 'none', height: '28px' }}
