@@ -13,7 +13,7 @@ import {
   Loader2,
   ShieldAlert,
 } from 'lucide-react';
-import { WatchPartyRole, WatchPartyStatus } from '../utils/watchParty';
+import { WatchPartyRole, WatchPartyStatus, MovieQuality } from '../utils/watchParty';
 
 interface WatchTogetherModalProps {
   isOpen: boolean;
@@ -31,6 +31,8 @@ interface WatchTogetherModalProps {
   onShowToast: (msg: string) => void;
   hasLoadedMedia: boolean;
   onRename?: (newName: string) => void;
+  movieQuality?: MovieQuality;
+  onChangeMovieQuality?: (quality: MovieQuality) => void;
 }
 
 export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
@@ -49,6 +51,8 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
   onShowToast,
   hasLoadedMedia,
   onRename,
+  movieQuality = '720p',
+  onChangeMovieQuality,
 }) => {
   const [activeTab, setActiveTab] = useState<'create' | 'join'>(
     role === 'guest' ? 'join' : 'create'
@@ -331,6 +335,60 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
                         }`}
                       />
                     </button>
+                  </div>
+
+                  {/* Movie Stream Quality Selector */}
+                  <div className="p-3 rounded-xl bg-zinc-800/40 border border-zinc-800 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <span className="text-xs font-medium text-zinc-200 block">
+                          Stream Quality
+                        </span>
+                        <span className="text-[11px] text-zinc-400 block">
+                          WebRTC movie bitrate to guests
+                        </span>
+                      </div>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                        {movieQuality === '1080p'
+                          ? '1080p ~8 Mbps'
+                          : movieQuality === '720p'
+                          ? '720p ~3 Mbps'
+                          : 'Auto (Balanced)'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-1.5 pt-1">
+                      {(
+                        [
+                          { key: 'auto', label: 'Auto', hint: 'Adaptive' },
+                          { key: '720p', label: '720p', hint: '~3 Mbps' },
+                          { key: '1080p', label: '1080p', hint: '~8 Mbps' },
+                        ] as const
+                      ).map((tier) => {
+                        const isSelected = movieQuality === tier.key;
+                        return (
+                          <button
+                            key={tier.key}
+                            type="button"
+                            onClick={() => onChangeMovieQuality?.(tier.key)}
+                            className={`py-2 px-2 rounded-lg text-xs font-semibold flex flex-col items-center justify-center transition-all ${
+                              isSelected
+                                ? 'bg-sky-500 text-zinc-950 shadow-md shadow-sky-500/20'
+                                : 'bg-zinc-800/80 hover:bg-zinc-800 text-zinc-300 border border-zinc-700/60'
+                            }`}
+                          >
+                            <span>{tier.label}</span>
+                            <span
+                              className={`text-[9px] ${
+                                isSelected ? 'text-zinc-900 font-medium' : 'text-zinc-500'
+                              }`}
+                            >
+                              {tier.hint}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
 
                   {/* Close Room Button */}

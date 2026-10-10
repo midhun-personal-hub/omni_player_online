@@ -88,9 +88,9 @@ export const FullscreenChatOverlay: React.FC<FullscreenChatOverlayProps> = ({
         {transientMessages.map(({ msg, addedAt }) => {
           const age = Date.now() - addedAt;
           const isFading = age > 4500;
-          const isMe = msg.fromId === myId || (myId === 'host' && msg.fromId === 'host');
+          const isMe = Boolean(msg.senderId) && msg.senderId === myId;
 
-          if (msg.kind === 'system') {
+          if (msg.kind === 'system' || !msg.senderId) {
             return (
               <div
                 key={msg.id}

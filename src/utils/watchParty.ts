@@ -62,6 +62,7 @@ export type WatchPartyCommand =
   | {
       type: 'chat';
       text: string;
+      senderId?: string;
     }
   | {
       type: 'chat-msg';
@@ -100,6 +101,23 @@ export type WatchPartyCommand =
   | {
       type: 'call-leave';
       peerId?: string;
+    }
+  | {
+      type: 'call-started';
+      peerId?: string;
+      name?: string;
+    }
+  | {
+      type: 'call-ended';
+      peerId?: string;
+    }
+  | {
+      type: 'call-signal';
+      senderId?: string;
+      targetId?: string;
+      signal:
+        | { type: 'description'; description: RTCSessionDescriptionInit }
+        | { type: 'candidate'; candidate: RTCIceCandidateInit };
     };
 
 export interface WatchPartyStateBroadcast {
@@ -122,7 +140,7 @@ export function generateRoomCode(): string {
   return result;
 }
 
-function getIceServers(): RTCIceServer[] {
+export function getIceServers(): RTCIceServer[] {
   const servers: RTCIceServer[] = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
@@ -141,23 +159,164 @@ function getIceServers(): RTCIceServer[] {
   return servers;
 }
 
-async function limitBitrate(pc: RTCPeerConnection | undefined, maxBitrateBps: number = 3_500_000) {
+export type MovieQuality = 'auto' | '720p' | '1080p';
+
+export const QUALITY_BITRATES: Record<'720p' | '1080p', number> = {
+  '720p': 3_000_000,
+  '1080p': 8_000_000,
+};
+
+export const DEFAULT_MOVIE_QUALITY: MovieQuality = '720p';
+
+/**
+ * Configure high-quality encoding parameters on a movie RTCRtpSender.
+ * - Sets maxBitrate based on quality mode
+ * - Sets scaleResolutionDownBy = 1 (never downscale)
+ * - Sets degradationPreference ("maintain-resolution" or "balanced" in Auto mode)
+ */
+export async function configureMovieSenderParameters(
+  sender: RTCRtpSender,
+  quality: MovieQuality = DEFAULT_MOVIE_QUALITY
+): Promise<boolean> {
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || params.encodings.length === 0) {
+      params.encodings = [{}];
+    }
+
+    const targetBitrate =
+      quality === '1080p'
+        ? QUALITY_BITRATES['1080p']
+        : QUALITY_BITRATES['720p'];
+
+    params.encodings[0].maxBitrate = targetBitrate;
+    params.encodings[0].scaleResolutionDownBy = 1;
+
+    // Use "balanced" for Auto mode so WebRTC can gracefully adapt framerate/resolution,
+    // and "maintain-resolution" for fixed quality tiers.
+    params.degradationPreference = quality === 'auto' ? 'balanced' : 'maintain-resolution';
+
+    await sender.setParameters(params);
+    return true;
+  } catch (err) {
+    console.debug('Failed to setParameters on sender:', err);
+    return false;
+  }
+}
+
+/**
+ * Prioritizes VP9 first, then H264, then remaining codecs on a transceiver.
+ */
+export function applyCodecPreferences(transceiver: RTCRtpTransceiver): void {
+  if (
+    typeof RTCRtpReceiver === 'undefined' ||
+    typeof RTCRtpReceiver.getCapabilities !== 'function' ||
+    typeof transceiver.setCodecPreferences !== 'function'
+  ) {
+    return;
+  }
+
+  try {
+    const capabilities = RTCRtpReceiver.getCapabilities('video');
+    if (!capabilities || !capabilities.codecs) return;
+
+    const codecs = capabilities.codecs;
+    const vp9Codecs = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/vp9');
+    const h264Codecs = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
+    const otherCodecs = codecs.filter(
+      (c) =>
+        c.mimeType.toLowerCase() !== 'video/vp9' &&
+        c.mimeType.toLowerCase() !== 'video/h264'
+    );
+
+    const preferredOrder = [...vp9Codecs, ...h264Codecs, ...otherCodecs];
+    transceiver.setCodecPreferences(preferredOrder);
+    console.debug('[OmniPlay WebRTC] Set video codec preferences: VP9 > H264 > others');
+  } catch (err) {
+    console.warn('[OmniPlay WebRTC] setCodecPreferences unsupported or failed:', err);
+  }
+}
+
+/**
+ * SDP transform fallback: injects b=AS:8000 into the video media section
+ * to guarantee high bandwidth even if setParameters is ignored or unsupported.
+ */
+export function injectSdpBandwidthFallback(sdp: string, bitrateKbps: number = 8000): string {
+  if (!sdp) return sdp;
+  // If b=AS is already present in video section, return as is
+  const lines = sdp.split('\r\n');
+  const modified: string[] = [];
+  let inVideoMline = false;
+  let hasBandwidthLine = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith('m=video')) {
+      inVideoMline = true;
+      hasBandwidthLine = false;
+      modified.push(line);
+      continue;
+    }
+
+    if (inVideoMline && line.startsWith('m=')) {
+      // Transitioning to another m-line: if we didn't add b=AS yet, insert it before next m-line
+      if (!hasBandwidthLine) {
+        modified.push(`b=AS:${bitrateKbps}`);
+      }
+      inVideoMline = false;
+    }
+
+    if (inVideoMline && line.startsWith('b=AS:')) {
+      hasBandwidthLine = true;
+      modified.push(`b=AS:${bitrateKbps}`);
+      continue;
+    }
+
+    if (inVideoMline && line.startsWith('b=TIAS:')) {
+      hasBandwidthLine = true;
+      modified.push(`b=TIAS:${bitrateKbps * 1000}`);
+      continue;
+    }
+
+    // Insert b=AS after c= line in video section if present
+    if (inVideoMline && line.startsWith('c=') && !hasBandwidthLine) {
+      modified.push(line);
+      modified.push(`b=AS:${bitrateKbps}`);
+      hasBandwidthLine = true;
+      continue;
+    }
+
+    modified.push(line);
+  }
+
+  // Handle case where video was the last media line and no b= line was added
+  if (inVideoMline && !hasBandwidthLine) {
+    modified.push(`b=AS:${bitrateKbps}`);
+  }
+
+  return modified.join('\r\n');
+}
+
+/**
+ * Configures all video senders on an RTCPeerConnection for the movie stream.
+ */
+export async function applyMovieBitrate(
+  pc: RTCPeerConnection | undefined,
+  quality: MovieQuality = DEFAULT_MOVIE_QUALITY
+): Promise<void> {
   if (!pc) return;
   try {
     const senders = pc.getSenders();
     for (const sender of senders) {
       if (sender.track && sender.track.kind === 'video') {
-        const params = sender.getParameters();
-        if (!params.encodings || params.encodings.length === 0) {
-          params.encodings = [{}];
+        const supported = await configureMovieSenderParameters(sender, quality);
+        if (!supported) {
+          console.debug('[OmniPlay WebRTC] Sender setParameters not supported, relying on SDP bandwidth');
         }
-        params.encodings[0].maxBitrate = maxBitrateBps;
-        await sender.setParameters(params);
       }
     }
   } catch (err) {
-    // Non-fatal if browser/connection doesn't support bitrate clamping
-    console.debug('Bitrate clamping info:', err);
+    console.debug('[OmniPlay WebRTC] Bitrate application info:', err);
   }
 }
 
@@ -175,6 +334,11 @@ export class WatchPartyService {
   private guestCount = 0;
   private clientNames: Map<string, string> = new Map();
   private hostDisplayName: string = 'Host';
+  private movieQuality: MovieQuality = DEFAULT_MOVIE_QUALITY;
+  private qualityListeners: Set<(quality: MovieQuality) => void> = new Set();
+  private statsIntervalId: ReturnType<typeof setInterval> | null = null;
+  private bandwidthLimitationSeconds = 0;
+  private previousBytesSentMap: Map<string, number> = new Map();
 
   // Guest state
   private guestDataConn: DataConnection | null = null;
@@ -225,6 +389,153 @@ export class WatchPartyService {
 
   public getMyPeerId(): string | null {
     return this.peer?.id || (this.role === 'host' ? 'host' : null);
+  }
+
+  public getMovieQuality(): MovieQuality {
+    return this.movieQuality;
+  }
+
+  public onMovieQuality(cb: (quality: MovieQuality) => void): () => void {
+    this.qualityListeners.add(cb);
+    cb(this.movieQuality);
+    return () => this.qualityListeners.delete(cb);
+  }
+
+  /**
+   * Updates movie stream quality live on all active peer connections without renegotiating.
+   */
+  public async setMovieQuality(quality: MovieQuality): Promise<void> {
+    this.movieQuality = quality;
+    this.bandwidthLimitationSeconds = 0;
+    this.qualityListeners.forEach((cb) => cb(quality));
+
+    for (const [, call] of this.mediaCalls.entries()) {
+      const pc = call.peerConnection;
+      if (pc) {
+        await applyMovieBitrate(pc, quality);
+      }
+    }
+    console.info(`[OmniPlay Stream] Live movie quality updated to: ${quality}`);
+  }
+
+  /**
+   * Automatically steps down the bitrate tier if bandwidth limitation persists.
+   */
+  private stepDownQuality(): void {
+    if (this.movieQuality === '1080p') {
+      console.warn('[OmniPlay Stream] Bandwidth limited for >10s. Stepping down to 720p.');
+      this.setMovieQuality('720p');
+    } else if (this.movieQuality === '720p') {
+      console.warn('[OmniPlay Stream] Bandwidth limited for >10s. Stepping down to Auto mode (balanced).');
+      this.setMovieQuality('auto');
+    }
+  }
+
+  /**
+   * Polls RTCPeerConnection stats every 3 seconds for outbound movie RTP streams
+   * and logs frame dimensions, FPS, bitrate, and qualityLimitationReason.
+   */
+  private startStatsPolling(): void {
+    if (this.statsIntervalId) return;
+
+    this.statsIntervalId = setInterval(async () => {
+      if (this.role !== 'host' || this.mediaCalls.size === 0) return;
+
+      let isAnyPeerBandwidthLimited = false;
+
+      for (const [peerId, call] of this.mediaCalls.entries()) {
+        const pc = call.peerConnection;
+        if (!pc || pc.connectionState === 'closed') continue;
+
+        try {
+          const stats = await pc.getStats();
+          stats.forEach((report) => {
+            if (report.type === 'outbound-rtp' && report.kind === 'video') {
+              const frameWidth = report.frameWidth ?? 'unknown';
+              const frameHeight = report.frameHeight ?? 'unknown';
+              const framesPerSecond = report.framesPerSecond ?? 'unknown';
+              const qualityLimitationReason = report.qualityLimitationReason ?? 'none';
+              const bytesSent = report.bytesSent ?? 0;
+
+              const prevBytes = this.previousBytesSentMap.get(peerId) ?? bytesSent;
+              this.previousBytesSentMap.set(peerId, bytesSent);
+
+              // 3 second interval => bps = ((bytesSent - prevBytes) * 8) / 3
+              const deltaBytes = Math.max(0, bytesSent - prevBytes);
+              const bitrateKbps = Math.round((deltaBytes * 8) / (3 * 1000));
+
+              console.log(
+                `[OmniPlay Stream Stats] Peer: ${peerId} | Resolution: ${frameWidth}x${frameHeight} | FPS: ${framesPerSecond} | Bitrate: ${bitrateKbps} kbps | Limit Reason: ${qualityLimitationReason} (Mode: ${this.movieQuality})`
+              );
+
+              if (qualityLimitationReason === 'bandwidth') {
+                isAnyPeerBandwidthLimited = true;
+              }
+            }
+          });
+        } catch {
+          // Ignore stats errors on transient disconnects
+        }
+      }
+
+      if (isAnyPeerBandwidthLimited) {
+        this.bandwidthLimitationSeconds += 3;
+        if (this.bandwidthLimitationSeconds >= 10) {
+          this.bandwidthLimitationSeconds = 0;
+          this.stepDownQuality();
+        }
+      } else {
+        this.bandwidthLimitationSeconds = Math.max(0, this.bandwidthLimitationSeconds - 3);
+      }
+    }, 3000);
+  }
+
+  private stopStatsPolling(): void {
+    if (this.statsIntervalId) {
+      clearInterval(this.statsIntervalId);
+      this.statsIntervalId = null;
+    }
+    this.previousBytesSentMap.clear();
+    this.bandwidthLimitationSeconds = 0;
+  }
+
+  /**
+   * Sets up transceiver codec preferences, sender parameters, SDP transforms,
+   * and connection state listeners on a movie stream call.
+   */
+  private configureMovieCall(call: MediaConnection): void {
+    const pc = call.peerConnection;
+    if (!pc) return;
+
+    // 1. Call setCodecPreferences on video transceiver with VP9 first, then H264, before offer
+    try {
+      const transceivers = pc.getTransceivers ? pc.getTransceivers() : [];
+      const videoTransceiver = transceivers.find((t) => t.sender.track?.kind === 'video');
+      if (videoTransceiver) {
+        applyCodecPreferences(videoTransceiver);
+      }
+    } catch (err) {
+      console.warn('[OmniPlay WebRTC] Video transceiver lookup warning:', err);
+    }
+
+    // 2. Call sender.setParameters immediately after tracks added
+    applyMovieBitrate(pc, this.movieQuality);
+
+    // 3. Re-apply once connectionState reaches 'connected'
+    const handleStateChange = () => {
+      if (pc.connectionState === 'connected') {
+        applyMovieBitrate(pc, this.movieQuality);
+      }
+    };
+    pc.addEventListener('connectionstatechange', handleStateChange);
+
+    // Also fallback with timer in case connectionState fires before listener or via iceConnectionState
+    setTimeout(() => {
+      applyMovieBitrate(pc, this.movieQuality);
+    }, 800);
+
+    // Start stats logging
+    this.startStatsPolling();
   }
 
   private setStatus(newStatus: WatchPartyStatus, errorMsg?: string) {
@@ -430,16 +741,19 @@ export class WatchPartyService {
         try {
           const call = this.peer.call(conn.peer, this.currentStream, {
             metadata: { kind: 'movie' },
+            // SDP transform fallback: inject b=AS:8000 into the offer video section
+            sdpTransform: (sdp: string) => injectSdpBandwidthFallback(sdp, 8000),
           });
           this.mediaCalls.set(conn.peer, call);
           call.on('close', () => {
             this.mediaCalls.delete(conn.peer);
+            if (this.mediaCalls.size === 0) {
+              this.stopStatsPolling();
+            }
           });
           call.on('error', (e) => console.warn('Call error with peer:', conn.peer, e));
 
-          setTimeout(() => {
-            limitBitrate(call.peerConnection);
-          }, 800);
+          this.configureMovieCall(call);
         } catch (e) {
           console.warn('Failed to call guest:', e);
         }
@@ -676,7 +990,7 @@ export class WatchPartyService {
       if (videoSender && newVideoTrack) {
         videoSender
           .replaceTrack(newVideoTrack)
-          .then(() => limitBitrate(pc))
+          .then(() => applyMovieBitrate(pc, this.movieQuality))
           .catch((err) => console.warn('replaceTrack video error:', err));
         replacedVideo = true;
       }
@@ -693,10 +1007,19 @@ export class WatchPartyService {
         try {
           call.close();
           if (this.peer) {
-            const newCall = this.peer.call(peerId, newStream);
+            const newCall = this.peer.call(peerId, newStream, {
+              metadata: { kind: 'movie' },
+              sdpTransform: (sdp: string) => injectSdpBandwidthFallback(sdp, 8000),
+            });
             this.mediaCalls.set(peerId, newCall);
+            newCall.on('close', () => {
+              this.mediaCalls.delete(peerId);
+              if (this.mediaCalls.size === 0) {
+                this.stopStatsPolling();
+              }
+            });
             newCall.on('error', (e) => console.warn('Re-call error:', e));
-            setTimeout(() => limitBitrate(newCall.peerConnection), 800);
+            this.configureMovieCall(newCall);
           }
         } catch (err) {
           console.warn('Call renegotiation error:', err);
@@ -706,6 +1029,7 @@ export class WatchPartyService {
   }
 
   public leave(): void {
+    this.stopStatsPolling();
     if (this.role === 'host') {
       // Inform guests
       try {

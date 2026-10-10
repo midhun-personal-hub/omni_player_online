@@ -15,7 +15,8 @@ interface ChatDrawerProps {
   onClose: () => void;
   messages: ChatMessage[];
   onSendMessage: (text: string) => void;
-  myId: string;
+  myId?: string;
+  myClientId?: string;
   participantCount: number;
   chatError: string | null;
   isConnected: boolean;
@@ -65,12 +66,14 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
   messages,
   onSendMessage,
   myId,
+  myClientId,
   participantCount,
   chatError,
   isConnected,
   soundEnabled,
   onToggleSound,
 }) => {
+  const currentClientId = myClientId || myId || '';
   const [inputText, setInputText] = useState('');
   const [showScrollBottomPill, setShowScrollBottomPill] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -199,32 +202,35 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
           </div>
         ) : (
           messages.map((msg, index) => {
-            if (msg.kind === 'system') {
+            // If system message or has no senderId: treat as non-own and center like "guest joined" pill
+            if (msg.kind === 'system' || !msg.senderId) {
               return (
                 <div key={msg.id} className="flex justify-center my-1.5">
-                  <span className="px-2.5 py-0.5 rounded-full bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-400 font-medium">
-                    {msg.text}
+                  <span className="px-2.5 py-0.5 rounded-full bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-400 font-medium text-center">
+                    {msg.kind === 'system' ? msg.text : `${msg.from}: ${msg.text}`}
                   </span>
                 </div>
               );
             }
 
-            const isMe = msg.fromId === myId || (myId === 'host' && msg.fromId === 'host');
+            const isOwn = msg.senderId === currentClientId;
             const prevMsg = messages[index - 1];
             const isSameSender =
               prevMsg &&
               prevMsg.kind === 'user' &&
-              prevMsg.fromId === msg.fromId &&
+              Boolean(prevMsg.senderId) &&
+              prevMsg.senderId === msg.senderId &&
               msg.ts - prevMsg.ts < 120000;
 
             return (
               <div
                 key={msg.id}
-                className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} ${
+                className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} ${
                   isSameSender ? 'mt-1' : 'mt-2.5'
                 }`}
+                style={{ alignSelf: isOwn ? 'flex-end' : 'flex-start' }}
               >
-                {!isMe && !isSameSender && (
+                {!isOwn && !isSameSender && (
                   <div className="flex items-baseline gap-1.5 mb-1 px-1">
                     <span className="text-[11px] font-semibold text-sky-400 max-w-[160px] truncate">
                       {msg.from}
@@ -235,15 +241,15 @@ export const ChatDrawer: React.FC<ChatDrawerProps> = ({
                   </div>
                 )}
 
-                <div className="flex items-end gap-1.5 max-w-[85%] group">
-                  {isMe && (
-                    <span className="text-[10px] text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity select-none">
+                <div className={`flex items-end gap-1.5 max-w-[80%] ${isOwn ? 'justify-end' : 'justify-start'}`}>
+                  {isOwn && (
+                    <span className="text-[10px] text-zinc-400 select-none shrink-0 mb-0.5">
                       {formatChatTime(msg.ts)}
                     </span>
                   )}
                   <div
                     className={`px-3 py-2 text-xs leading-relaxed break-words rounded-2xl shadow-sm ${
-                      isMe
+                      isOwn
                         ? 'bg-sky-500 text-zinc-950 font-medium rounded-tr-xs'
                         : 'bg-zinc-800 text-zinc-100 border border-zinc-700/60 rounded-tl-xs'
                     }`}

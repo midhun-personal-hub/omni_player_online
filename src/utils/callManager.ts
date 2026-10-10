@@ -1,4 +1,4 @@
-import { Peer, MediaConnection } from 'peerjs';
+import { getIceServers } from './watchParty';
 
 export interface RemoteParticipant {
   peerId: string;
@@ -16,6 +16,10 @@ export interface CallDevices {
   videoInputs: MediaDeviceInfo[];
 }
 
+export type CallSignal =
+  | { type: 'description'; description: RTCSessionDescriptionInit }
+  | { type: 'candidate'; candidate: RTCIceCandidateInit };
+
 export interface CallManagerCallbacks {
   onRemoteStreamsChange: (streams: Map<string, RemoteParticipant>) => void;
   onLocalStreamChange: (stream: MediaStream | null) => void;
@@ -26,6 +30,7 @@ export interface CallManagerCallbacks {
   onDevicesChange: (devices: CallDevices) => void;
   onToast: (msg: string) => void;
   onError: (err: string | null) => void;
+  onSendSignal: (targetPeerId: string, signal: CallSignal) => void;
 }
 
 const QUALITY_CONFIG: Record<CallQuality, { maxBitrate: number; scaleDown: number; maxFps: number }> = {
@@ -34,11 +39,20 @@ const QUALITY_CONFIG: Record<CallQuality, { maxBitrate: number; scaleDown: numbe
   high: { maxBitrate: 500_000, scaleDown: 1, maxFps: 20 },
 };
 
+interface PeerConnectionEntry {
+  pc: RTCPeerConnection;
+  remoteStream: MediaStream;
+  makingOffer: boolean;
+  ignoreOffer: boolean;
+  isSettingRemoteAnswerPending: boolean;
+  iceCandidateQueue: RTCIceCandidateInit[];
+}
+
 export class CallManager {
   private localStream: MediaStream | null = null;
-  private peer: Peer | null = null;
   private myPeerId: string | null = null;
   private myName: string = 'User';
+  private isPolite: boolean = false; // Host = impolite (false), Guest = polite (true)
 
   private inCall: boolean = false;
   private camEnabled: boolean = true;
@@ -47,8 +61,8 @@ export class CallManager {
   private quality: CallQuality = 'medium';
   private duckingEnabled: boolean = true;
 
-  // Active call connections: peerId -> MediaConnection
-  private connections: Map<string, MediaConnection> = new Map();
+  // Active peer connections: peerId -> PeerConnectionEntry
+  private peerConnections: Map<string, PeerConnectionEntry> = new Map();
   // Remote participants: peerId -> RemoteParticipant
   private remoteParticipants: Map<string, RemoteParticipant> = new Map();
 
@@ -79,10 +93,10 @@ export class CallManager {
     this.callbacks = callbacks;
   }
 
-  public setPeer(peer: Peer | null, myPeerId: string | null, myName: string) {
-    this.peer = peer;
+  public setPeerInfo(myPeerId: string | null, myName: string, isPolite: boolean) {
     this.myPeerId = myPeerId;
     this.myName = myName;
+    this.isPolite = isPolite;
   }
 
   public setRoster(peers: Array<{ id: string; name: string }>) {
@@ -96,16 +110,25 @@ export class CallManager {
     }
     this.notifyRemoteParticipants();
 
-    // If we are currently in a call, connect to any peer in the roster we haven't connected to yet
-    if (this.inCall && this.localStream && this.peer && this.myPeerId) {
+    // If we are currently in call, ensure peer connections exist and tracks are attached
+    if (this.inCall && this.localStream && this.myPeerId) {
       for (const p of peers) {
         if (p.id === this.myPeerId) continue;
-        // Lexicographical tie-breaker: the smaller peer ID initiates
-        if (this.myPeerId < p.id && !this.connections.has(p.id)) {
-          this.initiateCall(p.id);
-        }
+        const entry = this.getOrCreatePeerConnection(p.id);
+        this.syncLocalTracksToConnection(entry.pc);
       }
     }
+  }
+
+  public handlePeerJoined(remotePeerId: string) {
+    if (this.inCall && this.localStream) {
+      const entry = this.getOrCreatePeerConnection(remotePeerId);
+      this.syncLocalTracksToConnection(entry.pc);
+    }
+  }
+
+  public handlePeerLeft(remotePeerId: string) {
+    this.cleanupPeer(remotePeerId);
   }
 
   public updateParticipantMediaState(peerId: string, camOn: boolean, micOn: boolean) {
@@ -227,7 +250,6 @@ export class CallManager {
           this.localStream.addTrack(newAudioTrack);
           this.listenToTrackEnd(newAudioTrack, 'Microphone');
 
-          // Replace track in active calls
           this.replaceTrackInCalls(newAudioTrack);
           this.setupLocalAudioAnalyser();
         }
@@ -251,7 +273,6 @@ export class CallManager {
           this.localStream.addTrack(newVideoTrack);
           this.listenToTrackEnd(newVideoTrack, 'Camera');
 
-          // Replace track in active calls
           this.replaceTrackInCalls(newVideoTrack);
           this.applyBandwidthLimits();
         }
@@ -264,9 +285,9 @@ export class CallManager {
   }
 
   private replaceTrackInCalls(track: MediaStreamTrack) {
-    for (const conn of this.connections.values()) {
+    for (const entry of this.peerConnections.values()) {
       try {
-        const senders = conn.peerConnection.getSenders();
+        const senders = entry.pc.getSenders();
         const sender = senders.find((s) => s.track && s.track.kind === track.kind);
         if (sender) {
           sender.replaceTrack(track).catch((err) => console.warn('replaceTrack error:', err));
@@ -277,12 +298,12 @@ export class CallManager {
     }
   }
 
+  // --- START CALL (late-joiner or first initiator) ---
   public async startCall(): Promise<void> {
     if (this.inCall) return;
 
     this.callbacks.onError(null);
 
-    // Request camera and microphone
     let userStream: MediaStream | null = null;
     let cameraAllowed = true;
     let micAllowed = true;
@@ -308,7 +329,6 @@ export class CallManager {
         userStream = await navigator.mediaDevices.getUserMedia(constraints);
       } catch (firstErr) {
         console.warn('Full media request failed, attempting partial access:', firstErr);
-        // Try audio-only if camera was denied or not found
         try {
           userStream = await navigator.mediaDevices.getUserMedia({
             audio: {
@@ -322,7 +342,6 @@ export class CallManager {
           this.callbacks.onToast('Camera unavailable. Joined with microphone only.');
         } catch {
           micAllowed = false;
-          // Try video-only
           try {
             userStream = await navigator.mediaDevices.getUserMedia({
               video: {
@@ -356,7 +375,6 @@ export class CallManager {
     this.localStream = userStream;
     this.inCall = true;
 
-    // Attach track ended listeners
     for (const track of userStream.getTracks()) {
       this.listenToTrackEnd(track, track.kind === 'video' ? 'Camera' : 'Microphone');
     }
@@ -368,25 +386,27 @@ export class CallManager {
     this.callbacks.onCallStateChange(true);
     this.callbacks.onMediaStateChange(this.camEnabled, this.micEnabled);
 
-    // Refresh devices list
     this.enumerateDevices().catch(() => {});
 
-    // Set up audio analysis for speech & ducking
     this.initAudioContext();
     this.setupLocalAudioAnalyser();
     this.startSpeakingDetectionLoop();
 
-    // Call all participants in roster where myPeerId < remotePeerId
-    if (this.peer && this.myPeerId) {
+    // Attach local tracks to all existing peer connections or create connections for roster peers
+    if (this.myPeerId) {
       for (const [peerId] of this.roster.entries()) {
         if (peerId === this.myPeerId) continue;
-        if (this.myPeerId < peerId && !this.connections.has(peerId)) {
-          this.initiateCall(peerId);
-        }
+        const entry = this.getOrCreatePeerConnection(peerId);
+        this.syncLocalTracksToConnection(entry.pc);
       }
     }
 
-    // Start movie stream stutter detection
+    // If there are peer connections already established (e.g. from incoming signals), sync tracks to them
+    for (const [peerId, entry] of this.peerConnections.entries()) {
+      if (peerId === this.myPeerId) continue;
+      this.syncLocalTracksToConnection(entry.pc);
+    }
+
     this.startStutterMonitor();
   }
 
@@ -404,92 +424,270 @@ export class CallManager {
     };
   }
 
-  public handleIncomingCall(call: MediaConnection): boolean {
-    if (call.metadata?.kind !== 'cam') {
-      return false; // Not a camera call; let movie handler take it
+  // --- PERFECT NEGOTIATION CONNECTION CREATION ---
+  public getOrCreatePeerConnection(remotePeerId: string): PeerConnectionEntry {
+    let entry = this.peerConnections.get(remotePeerId);
+    if (entry) {
+      return entry;
     }
 
-    const remotePeerId = call.peer;
+    const iceServers = getIceServers();
+    const pc = new RTCPeerConnection({ iceServers });
+    const remoteStream = new MediaStream();
 
-    // If we're not in a call, we can answer with a blank or silent stream or answer once user joins
-    // If we are in a call, answer with our local stream
-    if (this.inCall && this.localStream) {
-      call.answer(this.localStream);
-      this.registerCall(call, remotePeerId);
-    } else {
-      // User is not in call yet; answer with dummy/empty stream or decline
-      // In PeerJS, if receiver doesn't answer, connection hangs.
-      // We answer with empty audio track or close if not in call.
-      call.close();
-    }
-    return true;
-  }
+    entry = {
+      pc,
+      remoteStream,
+      makingOffer: false,
+      ignoreOffer: false,
+      isSettingRemoteAnswerPending: false,
+      iceCandidateQueue: [],
+    };
+    this.peerConnections.set(remotePeerId, entry);
 
-  public onPeerJoinedCall(remotePeerId: string) {
-    // If we are in call and myPeerId < remotePeerId, initiate call
-    if (this.inCall && this.localStream && this.peer && this.myPeerId) {
-      if (this.myPeerId < remotePeerId && !this.connections.has(remotePeerId)) {
-        this.initiateCall(remotePeerId);
+    // 1. onnegotiationneeded (Standard Perfect Negotiation)
+    pc.onnegotiationneeded = async () => {
+      const currentEntry = this.peerConnections.get(remotePeerId);
+      if (!currentEntry) return;
+
+      try {
+        currentEntry.makingOffer = true;
+        console.log(
+          `[WebRTC Call] onnegotiationneeded (peer=${remotePeerId}, polite=${this.isPolite}): creating offer, signalingState=${pc.signalingState}`
+        );
+        await pc.setLocalDescription();
+        console.log(
+          `[WebRTC Call] Local description set (offer) for ${remotePeerId}, signalingState=${pc.signalingState}`
+        );
+        if (pc.localDescription) {
+          this.callbacks.onSendSignal(remotePeerId, {
+            type: 'description',
+            description: {
+              type: pc.localDescription.type,
+              sdp: pc.localDescription.sdp,
+            },
+          });
+        }
+      } catch (err) {
+        console.error(`[WebRTC Call] Error in onnegotiationneeded with ${remotePeerId}:`, err);
+      } finally {
+        currentEntry.makingOffer = false;
       }
-    }
-  }
+    };
 
-  private initiateCall(remotePeerId: string) {
-    if (!this.peer || !this.localStream) return;
+    // 2. onicecandidate
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate) {
+        this.callbacks.onSendSignal(remotePeerId, {
+          type: 'candidate',
+          candidate: candidate.toJSON(),
+        });
+      }
+    };
 
-    try {
-      const call = this.peer.call(remotePeerId, this.localStream, {
-        metadata: { kind: 'cam', name: this.myName },
-      });
-      this.registerCall(call, remotePeerId);
-    } catch (e) {
-      console.warn('Failed to initiate camera call to', remotePeerId, e);
-    }
-  }
+    // 3. onsignalingstatechange (Required for verification)
+    pc.onsignalingstatechange = () => {
+      console.log(`[WebRTC Call] signalingState for peer ${remotePeerId}: ${pc.signalingState}`);
+    };
 
-  private registerCall(call: MediaConnection, remotePeerId: string) {
-    this.connections.set(remotePeerId, call);
+    // 4. onconnectionstatechange (Required for verification)
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC Call] connectionState for peer ${remotePeerId}: ${pc.connectionState}`);
+      if (pc.connectionState === 'failed') {
+        console.warn(`[WebRTC Call] Connection failed with ${remotePeerId}, attempting ICE restart.`);
+        try {
+          pc.restartIce();
+        } catch {}
+      }
+    };
 
-    call.on('stream', (remoteStream: MediaStream) => {
-      const name = this.roster.get(remotePeerId) || call.metadata?.name || 'Friend';
-      const participant: RemoteParticipant = {
-        peerId: remotePeerId,
-        name,
-        stream: remoteStream,
-        camOn: remoteStream.getVideoTracks().some((t) => t.enabled),
-        micOn: remoteStream.getAudioTracks().some((t) => t.enabled),
-        speaking: false,
+    // 5. oniceconnectionstatechange
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC Call] iceConnectionState for peer ${remotePeerId}: ${pc.iceConnectionState}`);
+    };
+
+    // 6. ontrack (Required for verification & handles late-arriving tracks)
+    pc.ontrack = (event) => {
+      console.log(
+        `[WebRTC Call] ontrack event from ${remotePeerId}: kind=${event.track.kind}, id=${event.track.id}, streamCount=${event.streams.length}`
+      );
+
+      const targetStream = entry!.remoteStream;
+      const existing = targetStream.getTracks().find((t) => t.id === event.track.id);
+      if (!existing) {
+        targetStream.addTrack(event.track);
+      }
+
+      event.track.onmute = () => {
+        console.log(`[WebRTC Call] onmute track ${event.track.kind} from ${remotePeerId}`);
+        this.syncRemoteParticipant(remotePeerId);
+      };
+      event.track.onunmute = () => {
+        console.log(`[WebRTC Call] onunmute track ${event.track.kind} from ${remotePeerId}`);
+        this.syncRemoteParticipant(remotePeerId);
+      };
+      event.track.onended = () => {
+        console.log(`[WebRTC Call] onended track ${event.track.kind} from ${remotePeerId}`);
+        this.syncRemoteParticipant(remotePeerId);
       };
 
-      this.remoteParticipants.set(remotePeerId, participant);
-      this.notifyRemoteParticipants();
+      this.syncRemoteParticipant(remotePeerId);
+      this.setupRemoteAudioAnalyser(remotePeerId, targetStream);
+    };
 
-      // Setup audio analyser for this remote stream
-      this.setupRemoteAudioAnalyser(remotePeerId, remoteStream);
+    // Sync any existing local tracks if we are already in call
+    if (this.inCall && this.localStream) {
+      this.syncLocalTracksToConnection(pc);
+    }
 
-      // Apply bitrate capping
-      setTimeout(() => {
-        this.applyBandwidthLimitsToConnection(call);
-      }, 500);
-    });
+    return entry;
+  }
 
-    call.on('close', () => {
-      this.cleanupPeer(remotePeerId);
-    });
+  private syncLocalTracksToConnection(pc: RTCPeerConnection) {
+    if (!this.localStream) return;
 
-    call.on('error', (err) => {
-      console.warn('Call error with peer:', remotePeerId, err);
-      this.cleanupPeer(remotePeerId);
-    });
+    const existingSenders = pc.getSenders();
+    for (const track of this.localStream.getTracks()) {
+      const matchingSender = existingSenders.find(
+        (s) => s.track?.id === track.id || (s.track && s.track.kind === track.kind)
+      );
+
+      if (!matchingSender) {
+        console.log(`[WebRTC Call] Adding local track ${track.kind} (${track.id}) to RTCPeerConnection`);
+        pc.addTrack(track, this.localStream);
+      } else if (matchingSender.track !== track) {
+        console.log(`[WebRTC Call] Replacing local track ${track.kind} on existing sender`);
+        matchingSender.replaceTrack(track).catch((err) => console.warn('replaceTrack error:', err));
+      }
+    }
+
+    setTimeout(() => {
+      this.applyBandwidthLimitsToPC(pc);
+    }, 400);
+  }
+
+  private syncRemoteParticipant(remotePeerId: string) {
+    const entry = this.peerConnections.get(remotePeerId);
+    if (!entry) return;
+
+    const name = this.roster.get(remotePeerId) || 'Friend';
+    const videoTracks = entry.remoteStream.getVideoTracks();
+    const audioTracks = entry.remoteStream.getAudioTracks();
+
+    const camOn = videoTracks.length > 0 && videoTracks.some((t) => t.enabled && !t.muted);
+    const micOn = audioTracks.length > 0 && audioTracks.some((t) => t.enabled && !t.muted);
+
+    const participant: RemoteParticipant = {
+      peerId: remotePeerId,
+      name,
+      stream: entry.remoteStream,
+      camOn,
+      micOn,
+      speaking: false,
+    };
+
+    this.remoteParticipants.set(remotePeerId, participant);
+    this.notifyRemoteParticipants();
+  }
+
+  // --- SIGNALING INGESTION (Offer / Answer / Glare Rollback / ICE Queue) ---
+  public async handleIncomingSignal(peerId: string, signal: CallSignal) {
+    const entry = this.getOrCreatePeerConnection(peerId);
+    const { pc } = entry;
+
+    try {
+      if (signal.type === 'description') {
+        const description = signal.description;
+        const readyForOffer =
+          !entry.makingOffer &&
+          (pc.signalingState === 'stable' || entry.isSettingRemoteAnswerPending);
+        const offerCollision = description.type === 'offer' && !readyForOffer;
+
+        entry.ignoreOffer = !this.isPolite && offerCollision;
+        if (entry.ignoreOffer) {
+          console.log(
+            `[WebRTC Call] Impolite peer ignoring offer collision from ${peerId}, signalingState=${pc.signalingState}`
+          );
+          return;
+        }
+
+        if (offerCollision && this.isPolite) {
+          console.log(
+            `[WebRTC Call] Polite peer rolling back on offer collision from ${peerId}, signalingState=${pc.signalingState}`
+          );
+          await Promise.all([
+            pc.setLocalDescription({ type: 'rollback' }),
+            pc.setRemoteDescription(description),
+          ]);
+        } else {
+          entry.isSettingRemoteAnswerPending = description.type === 'answer';
+          await pc.setRemoteDescription(description);
+          entry.isSettingRemoteAnswerPending = false;
+        }
+
+        console.log(
+          `[WebRTC Call] setRemoteDescription success (${description.type}) from ${peerId}, signalingState=${pc.signalingState}`
+        );
+
+        // Process queued ICE candidates that arrived before remoteDescription was set
+        if (entry.iceCandidateQueue.length > 0) {
+          console.log(
+            `[WebRTC Call] Draining ${entry.iceCandidateQueue.length} queued ICE candidate(s) for ${peerId}`
+          );
+          while (entry.iceCandidateQueue.length > 0) {
+            const cand = entry.iceCandidateQueue.shift();
+            if (cand) {
+              try {
+                await pc.addIceCandidate(cand);
+              } catch (e) {
+                console.warn('[WebRTC Call] Error adding queued ICE candidate:', e);
+              }
+            }
+          }
+        }
+
+        if (description.type === 'offer') {
+          await pc.setLocalDescription();
+          console.log(
+            `[WebRTC Call] Answer created & local description set for ${peerId}, signalingState=${pc.signalingState}`
+          );
+          if (pc.localDescription) {
+            this.callbacks.onSendSignal(peerId, {
+              type: 'description',
+              description: {
+                type: pc.localDescription.type,
+                sdp: pc.localDescription.sdp,
+              },
+            });
+          }
+        }
+      } else if (signal.type === 'candidate') {
+        const candidate = signal.candidate;
+        if (!pc.remoteDescription || !pc.remoteDescription.type) {
+          console.log(`[WebRTC Call] Queueing ICE candidate for ${peerId} before remoteDescription is set`);
+          entry.iceCandidateQueue.push(candidate);
+        } else {
+          try {
+            await pc.addIceCandidate(candidate);
+          } catch (err) {
+            if (!entry.ignoreOffer) {
+              console.warn('[WebRTC Call] Error adding ICE candidate:', err);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[WebRTC Call] Error handling signal from ${peerId}:`, err);
+    }
   }
 
   private cleanupPeer(peerId: string) {
-    const conn = this.connections.get(peerId);
-    if (conn) {
+    const entry = this.peerConnections.get(peerId);
+    if (entry) {
       try {
-        conn.close();
+        entry.pc.close();
       } catch {}
-      this.connections.delete(peerId);
+      this.peerConnections.delete(peerId);
     }
     this.remoteParticipants.delete(peerId);
     const analyser = this.remoteAnalysers.get(peerId);
@@ -537,17 +735,16 @@ export class CallManager {
   }
 
   private applyBandwidthLimits() {
-    for (const conn of this.connections.values()) {
-      this.applyBandwidthLimitsToConnection(conn);
+    for (const entry of this.peerConnections.values()) {
+      this.applyBandwidthLimitsToPC(entry.pc);
     }
   }
 
-  private applyBandwidthLimitsToConnection(conn: MediaConnection) {
-    if (!conn.peerConnection) return;
+  private applyBandwidthLimitsToPC(pc: RTCPeerConnection) {
     const cfg = QUALITY_CONFIG[this.quality];
 
     try {
-      const senders = conn.peerConnection.getSenders();
+      const senders = pc.getSenders();
       for (const sender of senders) {
         if (sender.track?.kind === 'video') {
           const params = sender.getParameters();
@@ -563,7 +760,7 @@ export class CallManager {
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          params.encodings[0].maxBitrate = 32_000; // 32 kbps opus
+          params.encodings[0].maxBitrate = 32_000;
           sender.setParameters(params).catch(() => {});
         }
       }
@@ -575,7 +772,9 @@ export class CallManager {
   // --- AUDIO ANALYSIS & DUCKING ---
   private initAudioContext() {
     if (!this.audioCtx) {
-      const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtxClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (AudioCtxClass) {
         this.audioCtx = new AudioCtxClass();
       }
@@ -623,7 +822,7 @@ export class CallManager {
     if (this.speakingAnimFrame) return;
 
     const dataArray = new Uint8Array(128);
-    const RMS_THRESHOLD = 0.04; // Sensitivity threshold for speech
+    const RMS_THRESHOLD = 0.04;
 
     let lastAnySpeaking = false;
 
@@ -633,7 +832,6 @@ export class CallManager {
       const now = Date.now();
       let someoneElseSpeaking = false;
 
-      // Check remote speakers
       let changedRemote = false;
       for (const [peerId, analyser] of this.remoteAnalysers.entries()) {
         analyser.getByteTimeDomainData(dataArray);
@@ -667,7 +865,6 @@ export class CallManager {
         this.notifyRemoteParticipants();
       }
 
-      // Check local speaker
       if (this.localAnalyser && this.micEnabled) {
         this.localAnalyser.getByteTimeDomainData(dataArray);
         let sum = 0;
@@ -676,14 +873,9 @@ export class CallManager {
           sum += val * val;
         }
         const rms = Math.sqrt(sum / dataArray.length);
-        const wasSpeakingLocally = this.isSpeakingLocally;
         this.isSpeakingLocally = rms > RMS_THRESHOLD;
-        if (this.isSpeakingLocally !== wasSpeakingLocally) {
-          // Self speaking updated
-        }
       }
 
-      // Ducking multiplier: 30% when someone else is speaking
       const shouldDuck = this.duckingEnabled && someoneElseSpeaking;
       if (shouldDuck !== lastAnySpeaking) {
         lastAnySpeaking = shouldDuck;
@@ -697,19 +889,16 @@ export class CallManager {
     this.speakingAnimFrame = requestAnimationFrame(checkSpeaking);
   }
 
-  // --- STUTTER MONITOR (for movie upload) ---
   private startStutterMonitor() {
     if (this.stutterInterval) return;
 
     this.consecutiveBadStats = 0;
     this.stutterInterval = window.setInterval(async () => {
-      if (!this.inCall || this.connections.size === 0) return;
+      if (!this.inCall || this.peerConnections.size === 0) return;
 
-      // Sample first connection to see packet loss
-      for (const conn of this.connections.values()) {
-        if (!conn.peerConnection) continue;
+      for (const entry of this.peerConnections.values()) {
         try {
-          const stats = await conn.peerConnection.getStats();
+          const stats = await entry.pc.getStats();
           let packetsLost = 0;
           let packetsSent = 0;
 
@@ -733,14 +922,13 @@ export class CallManager {
               this.consecutiveBadStats = Math.max(0, this.consecutiveBadStats - 1);
             }
           }
-        } catch {
-          // ignore stats errors
-        }
+        } catch {}
         break;
       }
     }, 3000);
   }
 
+  // --- END CALL (Stops camera/mic tracks, removes senders) ---
   public endCall(): void {
     if (!this.inCall) return;
 
@@ -766,16 +954,17 @@ export class CallManager {
       this.localStream = null;
     }
 
-    // Close all connections
-    for (const conn of this.connections.values()) {
+    // Remove local tracks from all active peer connections
+    for (const entry of this.peerConnections.values()) {
       try {
-        conn.close();
+        const senders = entry.pc.getSenders();
+        for (const sender of senders) {
+          try {
+            entry.pc.removeTrack(sender);
+          } catch {}
+        }
       } catch {}
     }
-    this.connections.clear();
-    this.remoteParticipants.clear();
-    this.remoteAnalysers.clear();
-    this.speechHoldTimers.clear();
 
     if (this.audioCtx) {
       try {
@@ -784,9 +973,10 @@ export class CallManager {
       this.audioCtx = null;
     }
     this.localAnalyser = null;
+    this.remoteAnalysers.clear();
+    this.speechHoldTimers.clear();
 
     this.callbacks.onLocalStreamChange(null);
-    this.callbacks.onRemoteStreamsChange(new Map());
     this.callbacks.onCallStateChange(false);
     this.callbacks.onSpeakingChange(false, 1.0);
     this.callbacks.onStutterWarning(false);
@@ -794,6 +984,14 @@ export class CallManager {
 
   public cleanup(): void {
     this.endCall();
+    for (const entry of this.peerConnections.values()) {
+      try {
+        entry.pc.close();
+      } catch {}
+    }
+    this.peerConnections.clear();
+    this.remoteParticipants.clear();
     this.roster.clear();
+    this.callbacks.onRemoteStreamsChange(new Map());
   }
 }

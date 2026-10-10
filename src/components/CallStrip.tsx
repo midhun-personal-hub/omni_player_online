@@ -47,9 +47,24 @@ interface RemoteVideoTileProps {
 const RemoteVideoTile: React.FC<RemoteVideoTileProps> = ({ participant }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  const attachRemoteStream = React.useCallback(
+    (el: HTMLVideoElement | null) => {
+      videoRef.current = el;
+      if (el && participant.stream) {
+        if (el.srcObject !== participant.stream) {
+          el.srcObject = participant.stream;
+        }
+        el.play().catch(() => {});
+      }
+    },
+    [participant.stream]
+  );
+
   useEffect(() => {
     if (videoRef.current && participant.stream) {
-      videoRef.current.srcObject = participant.stream;
+      if (videoRef.current.srcObject !== participant.stream) {
+        videoRef.current.srcObject = participant.stream;
+      }
       videoRef.current.play().catch(() => {});
     }
   }, [participant.stream]);
@@ -66,7 +81,7 @@ const RemoteVideoTile: React.FC<RemoteVideoTileProps> = ({ participant }) => {
     >
       {/* Video Element */}
       <video
-        ref={videoRef}
+        ref={attachRemoteStream}
         autoPlay
         playsInline
         className={`w-full h-full object-cover transition-opacity duration-200 ${
@@ -128,6 +143,7 @@ export const CallStrip: React.FC<CallStripProps> = ({
   onTurnOffCamerasForBandwidth,
 }) => {
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
+  const [isHidden, setIsHidden] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [showHeadphoneTip, setShowHeadphoneTip] = useState<boolean>(() => {
     try {
@@ -139,12 +155,35 @@ export const CallStrip: React.FC<CallStripProps> = ({
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
 
+  // Callback ref to re-attach stream immediately whenever the element mounts
+  const attachLocalStream = React.useCallback(
+    (el: HTMLVideoElement | null) => {
+      localVideoRef.current = el;
+      if (el && localStream) {
+        if (el.srcObject !== localStream) {
+          el.srcObject = localStream;
+        }
+        el.muted = true;
+        el.play().catch((err) => {
+          console.warn('[CallStrip] Local preview play error on mount:', err);
+        });
+      }
+    },
+    [localStream]
+  );
+
+  // Re-attach whenever localStream updates or popup opens/unminimizes
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
-      localVideoRef.current.play().catch(() => {});
+    if (!isMinimized && !isHidden && localVideoRef.current && localStream) {
+      if (localVideoRef.current.srcObject !== localStream) {
+        localVideoRef.current.srcObject = localStream;
+      }
+      localVideoRef.current.muted = true;
+      localVideoRef.current.play().catch((err) => {
+        console.warn('[CallStrip] Local preview play error on open:', err);
+      });
     }
-  }, [localStream]);
+  }, [localStream, isMinimized, isHidden]);
 
   const dismissHeadphoneTip = () => {
     setShowHeadphoneTip(false);
@@ -155,6 +194,26 @@ export const CallStrip: React.FC<CallStripProps> = ({
 
   const participantCount = remoteStreams.size + 1;
   const selfInitial = myName.charAt(0).toUpperCase();
+
+  // If Hidden: Show compact floating button to reopen
+  if (isHidden) {
+    return (
+      <div className="absolute top-4 right-4 z-40 animate-in fade-in zoom-in-95 duration-150">
+        <button
+          onClick={() => {
+            setIsHidden(false);
+            setIsMinimized(false);
+          }}
+          className="flex items-center gap-2 px-3 py-1.5 bg-zinc-950/95 hover:bg-zinc-900 border border-emerald-500/50 backdrop-blur-md rounded-2xl shadow-2xl text-xs text-white transition-all group"
+          title="Click to show video call"
+        >
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <Video className="w-3.5 h-3.5 text-emerald-400 group-hover:scale-110 transition-transform" />
+          <span className="font-semibold text-emerald-200">Show Call ({participantCount})</span>
+        </button>
+      </div>
+    );
+  }
 
   // If Minimized: Show sleek floating pill
   if (isMinimized) {
@@ -206,11 +265,20 @@ export const CallStrip: React.FC<CallStripProps> = ({
             <Maximize2 className="w-3.5 h-3.5" />
           </button>
 
+          {/* Hide Button */}
+          <button
+            onClick={() => setIsHidden(true)}
+            className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors"
+            title="Hide Call Popup (Keep Talking)"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+
           {/* End Call Button */}
           <button
             onClick={onEndCall}
             className="p-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white transition-colors"
-            title="Leave Call"
+            title="Leave Call (Disconnect camera & mic)"
           >
             <PhoneOff className="w-3.5 h-3.5" />
           </button>
@@ -270,16 +338,25 @@ export const CallStrip: React.FC<CallStripProps> = ({
             <button
               onClick={() => setIsMinimized(true)}
               className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-              title="Minimize Video Strip"
+              title="Minimize to Pill"
             >
               <Minimize2 className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Hide / Close Popup button */}
+            <button
+              onClick={() => setIsHidden(true)}
+              className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+              title="Hide Call Popup (Keep Talking)"
+            >
+              <X className="w-3.5 h-3.5" />
             </button>
 
             {/* End Call button */}
             <button
               onClick={onEndCall}
               className="p-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white transition-colors"
-              title="Leave Call"
+              title="Leave Call (Disconnect camera & mic)"
             >
               <PhoneOff className="w-3.5 h-3.5" />
             </button>
@@ -332,7 +409,7 @@ export const CallStrip: React.FC<CallStripProps> = ({
           {/* Local User Tile */}
           <div className="relative w-28 sm:w-36 h-20 sm:h-24 bg-zinc-900 rounded-xl overflow-hidden border border-zinc-800 shrink-0 select-none shadow-md">
             <video
-              ref={localVideoRef}
+              ref={attachLocalStream}
               autoPlay
               playsInline
               muted

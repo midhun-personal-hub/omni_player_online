@@ -42,6 +42,7 @@ interface GuestPlayerProps {
   onToggleChat?: () => void;
   unreadCount?: number;
   inCall?: boolean;
+  incomingCall?: { active: boolean; name: string } | null;
   onStartCall?: () => void;
   duckingMultiplier?: number;
   callStrip?: React.ReactNode;
@@ -60,6 +61,7 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
   onToggleChat,
   unreadCount,
   inCall = false,
+  incomingCall,
   onStartCall,
   duckingMultiplier = 1.0,
   callStrip,
@@ -421,15 +423,20 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
 
       {/* TOP HEADER BAR (Overlaid) */}
       <div
-        className={`absolute top-0 left-0 right-0 z-30 px-4 py-3 bg-gradient-to-b from-black/80 to-transparent flex items-center justify-between transition-opacity duration-300 ${
+        className={`absolute top-0 left-0 right-0 z-30 px-3 sm:px-4 py-2 sm:py-3 bg-gradient-to-b from-black/80 to-transparent flex flex-wrap items-center justify-between gap-2 max-w-full box-border transition-opacity duration-300 ${
           controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
+        style={{
+          paddingTop: 'max(0.5rem, env(safe-area-inset-top, 0px))',
+          paddingLeft: 'max(0.75rem, env(safe-area-inset-left, 0px))',
+          paddingRight: 'max(0.75rem, env(safe-area-inset-right, 0px))',
+        }}
       >
         {/* Room Badge */}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shadow-lg">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Connected to room</span>
+        <div className="flex items-center gap-2 min-w-0 shrink-0">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shadow-lg whitespace-nowrap">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+            <span className="hidden sm:inline">Connected to room</span>
             <span className="font-mono font-bold text-sky-400">{roomCode}</span>
           </div>
           {hostState.mediaName && (
@@ -439,22 +446,36 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {!inCall && onStartCall && (
             <button
               onClick={onStartCall}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 transition-colors backdrop-blur-md shadow-sm"
-              title="Join Live Video Call"
+              className={`flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-lg transition-all backdrop-blur-md shadow-sm shrink-0 ${
+                incomingCall
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
+                  : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
+              }`}
+              title={
+                incomingCall
+                  ? `${incomingCall.name} started a call! Click to join`
+                  : 'Join Live Video Call'
+              }
+              aria-label={incomingCall ? 'Join incoming call' : 'Join call'}
             >
-              <Video className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Join Call</span>
+              <Video
+                className={`w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0 ${incomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
+              />
+              <span className="hidden sm:inline">
+                {incomingCall ? 'Incoming Call - Join' : 'Join Call'}
+              </span>
             </button>
           )}
 
+          {/* Chat pill - hidden on mobile (<640px) to eliminate duplication with header chat icon */}
           {onToggleChat && (
             <button
               onClick={onToggleChat}
-              className={`relative flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors backdrop-blur-md shadow-sm ${
+              className={`hidden sm:flex relative items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors backdrop-blur-md shadow-sm shrink-0 ${
                 isChatOpen
                   ? 'bg-sky-950/70 text-sky-300 border-sky-600/50'
                   : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 border-zinc-700/60'
@@ -471,14 +492,15 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
             </button>
           )}
 
-          {/* Leave Party Button */}
+          {/* Leave Party Button - always visible and accessible on mobile */}
           <button
             onClick={onLeave}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm"
+            className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm shrink-0"
             title="Leave Watch Party"
+            aria-label="Leave Watch Party"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Leave</span>
+            <LogOut className="w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0" />
+            <span className="hidden sm:inline">Leave</span>
           </button>
         </div>
       </div>

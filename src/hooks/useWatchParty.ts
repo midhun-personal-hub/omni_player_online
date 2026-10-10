@@ -4,6 +4,7 @@ import {
   WatchPartyRole,
   WatchPartyStatus,
   WatchPartyCommand,
+  MovieQuality,
 } from '../utils/watchParty';
 import { SubtitleTrack } from '../types/media';
 import { ChatMessage } from '../types/chat';
@@ -39,6 +40,18 @@ function sanitizeChatName(raw: unknown, defaultName = 'Guest'): string {
   return trimmed || defaultName;
 }
 
+function getOrCreateClientId(): string {
+  try {
+    const existing = sessionStorage.getItem('omniplay-client-id');
+    if (existing) return existing;
+    const fresh = crypto.randomUUID();
+    sessionStorage.setItem('omniplay-client-id', fresh);
+    return fresh;
+  } catch {
+    return crypto.randomUUID();
+  }
+}
+
 export function useWatchParty(options?: {
   mediaElement?: HTMLMediaElement | null;
   currentMediaUrl?: string;
@@ -47,6 +60,11 @@ export function useWatchParty(options?: {
   activeSubtitleTrack?: SubtitleTrack | null;
   onToast?: (msg: string) => void;
 }) {
+  const myClientIdRef = useRef<string>('');
+  if (!myClientIdRef.current) {
+    myClientIdRef.current = getOrCreateClientId();
+  }
+
   const {
     mediaElement,
     currentMediaUrl,
@@ -121,6 +139,20 @@ export function useWatchParty(options?: {
   const soundEnabledRef = useRef<boolean>(soundEnabled);
   soundEnabledRef.current = soundEnabled;
 
+  const [movieQuality, setMovieQualityState] = useState<MovieQuality>(() =>
+    watchPartyService.getMovieQuality()
+  );
+
+  useEffect(() => {
+    return watchPartyService.onMovieQuality((q) => {
+      setMovieQualityState(q);
+    });
+  }, []);
+
+  const setMovieQuality = useCallback((q: MovieQuality) => {
+    watchPartyService.setMovieQuality(q);
+  }, []);
+
   // Video Call State
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteParticipant>>(new Map());
@@ -134,8 +166,14 @@ export function useWatchParty(options?: {
   const [hostStutterWarning, setHostStutterWarning] = useState<boolean>(false);
   const [callError, setCallError] = useState<string | null>(null);
   const [volumeDuckingMultiplier, setVolumeDuckingMultiplier] = useState<number>(1.0);
+  const [incomingCall, setIncomingCall] = useState<{
+    active: boolean;
+    peerId: string;
+    name: string;
+  } | null>(null);
 
   const callManagerRef = useRef<CallManager | null>(null);
+  const inCallRef = useRef<boolean>(false);
 
   // Host-side participant registry & rate limiting
   const participantsRef = useRef<Map<string, string>>(new Map()); // peerId -> displayName
@@ -158,7 +196,11 @@ export function useWatchParty(options?: {
     callManagerRef.current = new CallManager({
       onRemoteStreamsChange: (streams) => setRemoteStreams(streams),
       onLocalStreamChange: (stream) => setLocalStream(stream),
-      onCallStateChange: (active) => setInCall(active),
+      onCallStateChange: (active) => {
+        inCallRef.current = active;
+        setInCall(active);
+        if (active) setIncomingCall(null);
+      },
       onMediaStateChange: (cam, mic) => {
         setCamEnabled(cam);
         setMicEnabled(mic);
@@ -175,30 +217,44 @@ export function useWatchParty(options?: {
       onDevicesChange: (devs) => setCallDevices(devs),
       onToast: (msg) => onToast?.(msg),
       onError: (err) => setCallError(err),
+      onSendSignal: (targetPeerId, signal) => {
+        const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+        if (isHost) {
+          watchPartyService.sendToPeer(targetPeerId, {
+            type: 'call-signal',
+            senderId: watchPartyService.getMyPeerId() || 'host',
+            targetId: targetPeerId,
+            signal,
+          });
+        } else {
+          watchPartyService.sendCommand({
+            type: 'call-signal',
+            senderId: watchPartyService.getMyPeerId() || undefined,
+            targetId: targetPeerId,
+            signal,
+          });
+        }
+      },
     });
   }
 
   // Update CallManager peer identity on room / role changes
   useEffect(() => {
     if (callManagerRef.current) {
-      callManagerRef.current.setPeer(
-        watchPartyService.getPeer(),
+      callManagerRef.current.setPeerInfo(
         watchPartyService.getMyPeerId(),
-        getSavedDisplayName() || (role === 'host' ? 'Host' : 'Guest')
+        getSavedDisplayName() || (role === 'host' ? 'Host' : 'Guest'),
+        role !== 'host'
       );
     }
   }, [role, status, getSavedDisplayName]);
 
-  // Hook into camera calls and roster events from watchPartyService
+  // Hook into roster events from watchPartyService
   useEffect(() => {
-    const unsubCam = watchPartyService.onCameraCall((call) => {
-      callManagerRef.current?.handleIncomingCall(call);
-    });
     const unsubRoster = watchPartyService.onRoster((peers) => {
       callManagerRef.current?.setRoster(peers);
     });
     return () => {
-      unsubCam();
       unsubRoster();
     };
   }, []);
@@ -256,7 +312,8 @@ export function useWatchParty(options?: {
       msg,
     });
 
-    if (msg.fromId !== 'host' && !isChatOpenRef.current) {
+    const isOwn = Boolean(msg.senderId) && msg.senderId === myClientIdRef.current;
+    if (!isOwn && !isChatOpenRef.current && msg.kind !== 'system') {
       setUnreadCount((c) => c + 1);
       if (!document.fullscreenElement) {
         onToast?.(`${msg.from}: ${msg.text}`);
@@ -340,7 +397,15 @@ export function useWatchParty(options?: {
       const combined = new MediaStream();
 
       if (!isAudio && captured) {
-        captured.getVideoTracks().forEach((vt) => combined.addTrack(vt));
+        captured.getVideoTracks().forEach((vt) => {
+          try {
+            // Optimizes WebRTC encoder for smooth framerate and fine motion (movies)
+            vt.contentHint = 'motion';
+          } catch {
+            // Ignore if contentHint unsupported in legacy environments
+          }
+          combined.addTrack(vt);
+        });
       }
 
       if (audioTrack) {
@@ -543,6 +608,7 @@ export function useWatchParty(options?: {
             id: crypto.randomUUID(),
             from: fromName,
             fromId: senderPeerId,
+            senderId: cmd.senderId || senderPeerId,
             text: clean,
             ts: Date.now(),
             kind: 'user',
@@ -558,16 +624,14 @@ export function useWatchParty(options?: {
             return next;
           });
 
-          const myPeerId = watchPartyService.getMyPeerId() || 'guest';
-          if (cmd.msg.fromId !== myPeerId) {
-            if (!isChatOpenRef.current) {
-              setUnreadCount((c) => c + 1);
-              if (!document.fullscreenElement) {
-                onToast?.(`${cmd.msg.from}: ${cmd.msg.text}`);
-              }
-              if (soundEnabledRef.current) {
-                playChatNotificationSound();
-              }
+          const isOwn = Boolean(cmd.msg.senderId) && cmd.msg.senderId === myClientIdRef.current;
+          if (!isOwn && !isChatOpenRef.current && cmd.msg.kind !== 'system') {
+            setUnreadCount((c) => c + 1);
+            if (!document.fullscreenElement) {
+              onToast?.(`${cmd.msg.from}: ${cmd.msg.text}`);
+            }
+            if (soundEnabledRef.current) {
+              playChatNotificationSound();
             }
           }
         }
@@ -599,22 +663,47 @@ export function useWatchParty(options?: {
             cmd.micOn
           );
         }
-      } else if (cmd.type === 'call-join') {
+      } else if (cmd.type === 'call-join' || cmd.type === 'call-started') {
+        const peerId = cmd.peerId || senderPeerId || 'host';
+        const name = (cmd as { name?: string }).name || 'Friend';
+
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
           watchPartyService.sendCommand({
-            type: 'call-join',
+            type: cmd.type,
             peerId: senderPeerId,
+            name,
           });
-          callManagerRef.current?.onPeerJoinedCall(senderPeerId);
+          callManagerRef.current?.handlePeerJoined(senderPeerId);
         } else {
-          callManagerRef.current?.onPeerJoinedCall(cmd.peerId || 'host');
+          callManagerRef.current?.handlePeerJoined(cmd.peerId || 'host');
         }
-      } else if (cmd.type === 'call-leave') {
+
+        if (!inCallRef.current) {
+          setIncomingCall({ active: true, peerId, name });
+          onToast?.(`${name} started a video call!`);
+        }
+      } else if (cmd.type === 'call-leave' || cmd.type === 'call-ended') {
+        const peerId = cmd.peerId || senderPeerId || 'host';
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
           watchPartyService.sendCommand({
-            type: 'call-leave',
+            type: cmd.type,
             peerId: senderPeerId,
           });
+          callManagerRef.current?.handlePeerLeft(senderPeerId);
+        } else {
+          callManagerRef.current?.handlePeerLeft(cmd.peerId || 'host');
+        }
+        setIncomingCall((prev) => (prev?.peerId === peerId ? null : prev));
+      } else if (cmd.type === 'call-signal') {
+        const senderId = cmd.senderId || senderPeerId || 'host';
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          if (cmd.targetId && cmd.targetId !== watchPartyService.getMyPeerId()) {
+            watchPartyService.sendToPeer(cmd.targetId, cmd);
+          } else {
+            callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal);
+          }
+        } else {
+          callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal);
         }
       }
     });
@@ -664,7 +753,7 @@ export function useWatchParty(options?: {
     participantsRef.current.clear();
     const myName = getSavedDisplayName() || 'Host';
     watchPartyService.setHostDisplayName(myName);
-    callManagerRef.current?.setPeer(watchPartyService.getPeer(), watchPartyService.getMyPeerId(), myName);
+    callManagerRef.current?.setPeerInfo(watchPartyService.getMyPeerId(), myName, false);
     onToast?.('Room created');
 
     // Check 6: Diagnostic logs for video state when room starts
@@ -696,12 +785,14 @@ export function useWatchParty(options?: {
     setMessages([]);
     messagesRef.current = [];
     setUnreadCount(0);
-    callManagerRef.current?.setPeer(watchPartyService.getPeer(), watchPartyService.getMyPeerId(), chosenName);
+    callManagerRef.current?.setPeerInfo(watchPartyService.getMyPeerId(), chosenName, true);
   };
 
   const leaveRoom = () => {
     callManagerRef.current?.cleanup();
+    inCallRef.current = false;
     setInCall(false);
+    setIncomingCall(null);
     setLocalStream(null);
     setRemoteStreams(new Map());
     setHostStutterWarning(false);
@@ -762,6 +853,7 @@ export function useWatchParty(options?: {
           id: crypto.randomUUID(),
           from: hostName,
           fromId: 'host',
+          senderId: myClientIdRef.current,
           text: clean,
           ts: Date.now(),
           kind: 'user',
@@ -771,6 +863,7 @@ export function useWatchParty(options?: {
         watchPartyService.sendCommand({
           type: 'chat',
           text: clean,
+          senderId: myClientIdRef.current,
         });
       }
     },
@@ -831,19 +924,30 @@ export function useWatchParty(options?: {
   const startCall = useCallback(async () => {
     if (!callManagerRef.current) return;
     const myName = getSavedDisplayName() || (roleRef.current === 'host' ? 'Host' : 'Guest');
-    callManagerRef.current.setPeer(
-      watchPartyService.getPeer(),
+    callManagerRef.current.setPeerInfo(
       watchPartyService.getMyPeerId(),
-      myName
+      myName,
+      roleRef.current !== 'host'
     );
     await callManagerRef.current.startCall();
+    setIncomingCall(null);
+    watchPartyService.sendCommand({
+      type: 'call-started',
+      peerId: watchPartyService.getMyPeerId() || undefined,
+      name: myName,
+    });
     watchPartyService.sendCommand({ type: 'call-join' });
   }, [getSavedDisplayName]);
 
   const endCall = useCallback(() => {
     if (!callManagerRef.current) return;
+    watchPartyService.sendCommand({
+      type: 'call-ended',
+      peerId: watchPartyService.getMyPeerId() || undefined,
+    });
     watchPartyService.sendCommand({ type: 'call-leave' });
     callManagerRef.current.endCall();
+    setIncomingCall(null);
   }, []);
 
   const toggleCam = useCallback(() => {
@@ -919,7 +1023,8 @@ export function useWatchParty(options?: {
     soundEnabled,
     setSoundEnabled: handleToggleSound,
     rename,
-    myId: watchPartyService.getMyPeerId() || (role === 'host' ? 'host' : 'guest'),
+    myId: myClientIdRef.current,
+    myClientId: myClientIdRef.current,
     // Video Call additions
     localStream,
     remoteStreams,
@@ -943,5 +1048,10 @@ export function useWatchParty(options?: {
     dismissStutterWarning,
     turnOffCamerasForBandwidth,
     volumeDuckingMultiplier,
+    incomingCall,
+    dismissIncomingCall: () => setIncomingCall(null),
+    // Movie Stream Quality additions
+    movieQuality,
+    setMovieQuality,
   };
 }

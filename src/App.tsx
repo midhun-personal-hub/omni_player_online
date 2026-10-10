@@ -16,6 +16,8 @@ import {
   Users,
   MessageSquare,
   Video,
+  X,
+  MoreVertical,
 } from 'lucide-react';
 import {
   MediaItem,
@@ -291,6 +293,10 @@ export default function App() {
     dismissStutterWarning: watchDismissStutterWarning,
     turnOffCamerasForBandwidth: watchTurnOffCamerasForBandwidth,
     volumeDuckingMultiplier: watchVolumeDuckingMultiplier,
+    incomingCall: watchIncomingCall,
+    dismissIncomingCall: watchDismissIncomingCall,
+    movieQuality: watchMovieQuality,
+    setMovieQuality: watchSetMovieQuality,
   } = useWatchParty({
     mediaElement: activeMediaElement,
     currentMediaUrl: currentMedia?.url,
@@ -302,6 +308,8 @@ export default function App() {
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isFullscreenChatInputOpen, setIsFullscreenChatInputOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const mobileMenuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const handleFsChange = () => {
@@ -310,6 +318,17 @@ export default function App() {
     document.addEventListener('fullscreenchange', handleFsChange);
     return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
+
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (mobileMenuRef.current && !mobileMenuRef.current.contains(e.target as Node)) {
+        setIsMobileMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isMobileMenuOpen]);
 
   const callStripElement =
     watchRole !== null && watchInCall ? (
@@ -408,22 +427,30 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 overflow-hidden font-sans">
       {/* Top Application Header */}
-      <header className="h-14 border-b border-zinc-800/80 bg-zinc-900/95 px-4 flex items-center justify-between z-30 shrink-0 backdrop-blur-md">
+      <header
+        className="h-14 border-b border-zinc-800/80 bg-zinc-900/95 px-3 sm:px-4 flex items-center justify-between z-30 shrink-0 backdrop-blur-md max-w-full box-border overflow-x-hidden relative"
+        style={{
+          paddingTop: 'env(safe-area-inset-top, 0px)',
+          paddingLeft: 'max(0.75rem, env(safe-area-inset-left, 0px))',
+          paddingRight: 'max(0.75rem, env(safe-area-inset-right, 0px))',
+        }}
+      >
         {/* Brand & Status */}
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink">
+          <div className="flex items-center gap-2 shrink-0">
+            <div className="w-8 h-8 rounded-lg bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400 shrink-0">
               <Film className="w-4 h-4" />
             </div>
-            <span className="font-bold text-sm tracking-wide text-white">OmniPlay</span>
+            <span className="font-bold text-sm tracking-wide text-white truncate">OmniPlay</span>
           </div>
           {watchRole === 'host' ? (
-            <div className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-400 font-medium">
-              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
-              <span>LIVE · {watchViewerCount} {watchViewerCount === 1 ? 'viewer' : 'viewers'}</span>
+            <div className="flex items-center gap-1.5 px-2 sm:px-2.5 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/30 text-[10px] sm:text-[11px] text-rose-400 font-medium shrink-0 whitespace-nowrap">
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse shrink-0" />
+              <span className="hidden sm:inline">LIVE · {watchViewerCount} {watchViewerCount === 1 ? 'viewer' : 'viewers'}</span>
+              <span className="sm:hidden font-bold">LIVE {watchViewerCount}</span>
             </div>
           ) : (
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-800/80 border border-zinc-700/50 text-[11px] text-zinc-400">
+            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-zinc-800/80 border border-zinc-700/50 text-[11px] text-zinc-400 shrink-0">
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               <span>Direct Local Playback</span>
             </div>
@@ -431,11 +458,11 @@ export default function App() {
         </div>
 
         {/* Global Action Buttons */}
-        <div className="flex items-center gap-2">
-          {/* Watch Together */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 min-w-0">
+          {/* Watch Together - Visible on sm: screens and up */}
           <button
             onClick={() => setIsWatchTogetherOpen(true)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+            className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
               watchRole === 'host'
                 ? 'bg-rose-950/60 text-rose-300 border-rose-600/50 shadow-xs'
                 : watchRole === 'guest'
@@ -445,7 +472,7 @@ export default function App() {
             title="Watch Together with friends"
           >
             <Users className="w-3.5 h-3.5 text-sky-400" />
-            <span className="hidden sm:inline">Watch Together</span>
+            <span>Watch Together</span>
             {watchRole === 'host' && (
               <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold">
                 {watchViewerCount}
@@ -453,40 +480,66 @@ export default function App() {
             )}
           </button>
 
-          {/* Room Chat Button (only visible when a watch party is active) */}
+          {/* Room Chat Button (visible when a watch party is active - both mobile icon and desktop pill) */}
           {watchRole !== null && (
             <button
               onClick={() => setWatchChatOpen(!watchIsChatOpen)}
-              className={`relative flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors shadow-xs ${
+              className={`relative flex items-center justify-center gap-1.5 w-10 h-10 p-0 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 ${
                 watchIsChatOpen
                   ? 'bg-sky-950/70 text-sky-300 border-sky-600/50'
                   : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
               }`}
               title="Toggle Room Chat"
+              aria-label="Toggle Room Chat"
             >
-              <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+              <MessageSquare className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
               <span className="hidden sm:inline">Chat</span>
               {watchUnreadCount > 0 && (
-                <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold">
+                <span className="absolute -top-1 -right-1 sm:static px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
                   {watchUnreadCount}
                 </span>
               )}
             </button>
           )}
 
-          {/* Video Call Button (only visible when in watch party and not already in call) */}
+          {/* Video Call Button (visible when in watch party and not already in call) */}
           {watchRole !== null && !watchInCall && (
             <button
               onClick={watchStartCall}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors shadow-xs"
-              title="Join Live Video & Voice Call"
+              className={`flex items-center justify-center gap-1.5 w-10 h-10 p-0 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 text-xs font-semibold rounded-lg transition-all shadow-xs shrink-0 ${
+                watchIncomingCall
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
+                  : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+              }`}
+              title={
+                watchIncomingCall
+                  ? `${watchIncomingCall.name} is calling! Click to join`
+                  : 'Join Live Video & Voice Call'
+              }
+              aria-label={watchIncomingCall ? 'Incoming Call - Join' : 'Join Call'}
             >
-              <Video className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="hidden sm:inline">Join Call</span>
+              <Video
+                className={`w-4 h-4 sm:w-3.5 sm:h-3.5 ${watchIncomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
+              />
+              <span className="hidden sm:inline">
+                {watchIncomingCall ? 'Incoming Call - Join' : 'Join Call'}
+              </span>
             </button>
           )}
 
-          {/* Open Files */}
+          {/* Open Files - Mobile direct quick-button when not in watch party */}
+          {watchRole === null && (
+            <button
+              onClick={() => headerFileInputRef.current?.click()}
+              className="sm:hidden flex items-center justify-center w-10 h-10 p-0 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/60 transition-colors shadow-xs shrink-0"
+              title="Open local files"
+              aria-label="Open local files"
+            >
+              <FilePlus className="w-4 h-4 text-sky-400" />
+            </button>
+          )}
+
+          {/* Open Files - Hidden input */}
           <input
             type="file"
             ref={headerFileInputRef}
@@ -498,16 +551,17 @@ export default function App() {
             }}
             className="hidden"
           />
+          {/* Open Files - Desktop */}
           <button
             onClick={() => headerFileInputRef.current?.click()}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/60 transition-colors shadow-xs"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/60 transition-colors shadow-xs"
             title="Open local files"
           >
             <FilePlus className="w-3.5 h-3.5 text-sky-400" />
-            <span className="hidden sm:inline">Choose Files</span>
+            <span>Choose Files</span>
           </button>
 
-          {/* Open Folder */}
+          {/* Open Folder - Hidden input */}
           <input
             type="file"
             ref={headerFolderInputRef}
@@ -520,6 +574,7 @@ export default function App() {
             }}
             className="hidden"
           />
+          {/* Open Folder - Desktop */}
           <button
             onClick={() => headerFolderInputRef.current?.click()}
             className="hidden md:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/60 transition-colors"
@@ -529,20 +584,20 @@ export default function App() {
             <span>Folder</span>
           </button>
 
-          {/* Effects & EQ */}
+          {/* Effects & EQ - Desktop */}
           <button
             onClick={() => setIsEffectsOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/60 transition-colors"
+            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/60 transition-colors"
             title="Audio Equalizer & Video Filters"
           >
             <Sliders className="w-3.5 h-3.5 text-sky-400" />
             <span className="hidden lg:inline">Audio & FX</span>
           </button>
 
-          {/* Queue / Playlist Drawer Trigger */}
+          {/* Queue / Playlist Drawer Trigger - Desktop */}
           <button
             onClick={() => setIsPlaylistOpen(!isPlaylistOpen)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+            className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
               isPlaylistOpen
                 ? 'bg-sky-950/60 text-sky-300 border-sky-600/50'
                 : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
@@ -558,16 +613,172 @@ export default function App() {
             )}
           </button>
 
-          {/* Keyboard Shortcuts Trigger */}
+          {/* Keyboard Shortcuts Trigger - Desktop */}
           <button
             onClick={() => setIsShortcutsOpen(true)}
-            className="p-1.5 text-zinc-400 hover:text-white rounded-lg hover:bg-zinc-800 transition-colors"
+            className="hidden sm:flex p-1.5 text-zinc-400 hover:text-white rounded-lg hover:bg-zinc-800 transition-colors"
             title="Keyboard Shortcuts (?)"
           >
             <Keyboard className="w-4 h-4" />
           </button>
+
+          {/* Mobile "More" (three-dots) Menu Container (sm:hidden) */}
+          <div className="relative sm:hidden" ref={mobileMenuRef}>
+            <button
+              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              className={`flex items-center justify-center w-10 h-10 p-0 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 ${
+                isMobileMenuOpen
+                  ? 'bg-zinc-700 text-white border-zinc-500'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
+              }`}
+              title="More actions"
+              aria-label="More actions"
+              aria-expanded={isMobileMenuOpen}
+            >
+              <MoreVertical className="w-4 h-4 text-zinc-300" />
+            </button>
+
+            {/* Mobile Dropdown Menu */}
+            {isMobileMenuOpen && (
+              <div
+                className="absolute right-0 top-12 z-50 w-52 rounded-xl bg-zinc-900 border border-zinc-800 p-1.5 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150 space-y-0.5"
+                role="menu"
+                aria-orientation="vertical"
+              >
+                {/* Watch Together / Participants */}
+                <button
+                  onClick={() => {
+                    setIsWatchTogetherOpen(true);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
+                  role="menuitem"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Users className="w-4 h-4 text-sky-400" />
+                    <span>{watchRole ? 'Watch Party Room' : 'Watch Together'}</span>
+                  </div>
+                  {watchRole === 'host' && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold">
+                      {watchViewerCount}
+                    </span>
+                  )}
+                </button>
+
+                {/* Add Files */}
+                <button
+                  onClick={() => {
+                    headerFileInputRef.current?.click();
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
+                  role="menuitem"
+                >
+                  <FilePlus className="w-4 h-4 text-sky-400" />
+                  <span>Choose Files</span>
+                </button>
+
+                {/* Folder */}
+                <button
+                  onClick={() => {
+                    headerFolderInputRef.current?.click();
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
+                  role="menuitem"
+                >
+                  <FolderOpen className="w-4 h-4 text-amber-400" />
+                  <span>Open Folder</span>
+                </button>
+
+                {/* Audio & FX */}
+                <button
+                  onClick={() => {
+                    setIsEffectsOpen(true);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
+                  role="menuitem"
+                >
+                  <Sliders className="w-4 h-4 text-sky-400" />
+                  <span>Audio & Video FX</span>
+                </button>
+
+                {/* Queue / Playlist */}
+                <button
+                  onClick={() => {
+                    setIsPlaylistOpen(!isPlaylistOpen);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
+                  role="menuitem"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <ListMusic className="w-4 h-4 text-sky-400" />
+                    <span>Queue</span>
+                  </div>
+                  {playlist.length > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold">
+                      {playlist.length}
+                    </span>
+                  )}
+                </button>
+
+                {/* Keyboard Shortcuts */}
+                <button
+                  onClick={() => {
+                    setIsShortcutsOpen(true);
+                    setIsMobileMenuOpen(false);
+                  }}
+                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
+                  role="menuitem"
+                >
+                  <Keyboard className="w-4 h-4 text-zinc-400" />
+                  <span>Shortcuts (?)</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
+
+      {/* Incoming Call Alert Banner */}
+      {watchRole !== null && watchIncomingCall && !watchInCall && (
+        <aside
+          role="status"
+          aria-label="Incoming video call"
+          className="fixed top-16 right-3 left-3 sm:left-auto sm:right-4 sm:max-w-md z-50 flex items-center justify-between gap-3 p-3 bg-zinc-950/95 border border-emerald-500/70 rounded-2xl shadow-2xl backdrop-blur-md animate-in slide-in-from-top duration-200"
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+              <span className="absolute w-full h-full rounded-full bg-emerald-400/40 animate-ping" />
+              <Video className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div className="text-xs min-w-0">
+              <p className="font-semibold text-white truncate">
+                {watchIncomingCall.name} started a video call
+              </p>
+              <p className="text-[11px] text-zinc-400 truncate">Join to chat with camera & microphone</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              onClick={watchStartCall}
+              className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-emerald-950/40 min-h-[36px]"
+            >
+              <Video className="w-3.5 h-3.5" />
+              <span>Join</span>
+            </button>
+            <button
+              onClick={watchDismissIncomingCall}
+              className="p-1.5 text-zinc-400 hover:text-zinc-200 rounded-lg hover:bg-zinc-800 transition-colors min-w-[36px] min-h-[36px] flex items-center justify-center"
+              title="Dismiss banner"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </aside>
+      )}
 
       {/* Main Player Display Area */}
       <main className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
@@ -589,6 +800,7 @@ export default function App() {
             onToggleChat={() => setWatchChatOpen(!watchIsChatOpen)}
             unreadCount={watchUnreadCount}
             inCall={watchInCall}
+            incomingCall={watchIncomingCall}
             onStartCall={watchStartCall}
             duckingMultiplier={watchVolumeDuckingMultiplier}
             callStrip={callStripElement}
@@ -700,6 +912,8 @@ export default function App() {
         onShowToast={showAppToast}
         hasLoadedMedia={!!currentMedia}
         onRename={watchRename}
+        movieQuality={watchMovieQuality}
+        onChangeMovieQuality={watchSetMovieQuality}
       />
 
       {/* Real-time Watch Together Room Chat Drawer */}
