@@ -23,6 +23,9 @@ import {
   Settings,
   Sparkles,
   Repeat,
+  MessageSquare,
+  Video,
+  LogOut,
 } from 'lucide-react';
 import {
   MediaItem,
@@ -56,6 +59,14 @@ interface VideoPlayerProps {
   onSubtitleTrackChange?: (track: SubtitleTrack | null) => void;
   duckingMultiplier?: number;
   callStrip?: React.ReactNode;
+  roomCode?: string;
+  isChatOpen?: boolean;
+  onToggleChat?: () => void;
+  unreadCount?: number;
+  inCall?: boolean;
+  incomingCall?: { active: boolean; name: string } | null;
+  onStartCall?: () => void;
+  onLeave?: () => void;
 }
 
 const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
@@ -78,6 +89,14 @@ const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
   onSubtitleTrackChange,
   duckingMultiplier = 1.0,
   callStrip,
+  roomCode,
+  isChatOpen,
+  onToggleChat,
+  unreadCount,
+  inCall = false,
+  incomingCall,
+  onStartCall,
+  onLeave,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mediaRef = useRef<HTMLVideoElement | null>(null);
@@ -724,29 +743,109 @@ const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
         className={`absolute top-0 inset-x-0 z-30 p-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent transition-opacity duration-300 flex items-center justify-between ${
           controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
+        style={{
+          paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))',
+          paddingLeft: 'max(1rem, env(safe-area-inset-left, 0px))',
+          paddingRight: 'max(1rem, env(safe-area-inset-right, 0px))',
+        }}
       >
         <div className="flex items-center gap-3 min-w-0 pr-4">
-          <div className="truncate">
-            <h1 className="text-sm font-semibold text-white tracking-wide truncate">
-              {currentMedia.name}
-            </h1>
-            <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mt-0.5">
-              <span className="uppercase text-sky-400 font-semibold">{currentMedia.extension}</span>
-              <span>·</span>
-              <span>Local Storage Playback</span>
-              {currentMedia.width && currentMedia.height && (
-                <>
-                  <span>·</span>
-                  <span>
-                    {currentMedia.width}×{currentMedia.height}
-                  </span>
-                </>
-              )}
+          {roomCode ? (
+            <div className="flex items-center gap-2 min-w-0 shrink-0">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shadow-lg whitespace-nowrap">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <span className="hidden sm:inline">Room</span>
+                <span className="font-mono font-bold text-sky-400">{roomCode}</span>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="truncate">
+              <h1 className="text-sm font-semibold text-white tracking-wide truncate">
+                {currentMedia.name}
+              </h1>
+              <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mt-0.5">
+                <span className="uppercase text-sky-400 font-semibold">{currentMedia.extension}</span>
+                <span>·</span>
+                <span>Local Storage Playback</span>
+                {currentMedia.width && currentMedia.height && (
+                  <>
+                    <span>·</span>
+                    <span>
+                      {currentMedia.width}×{currentMedia.height}
+                    </span>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
+          {roomCode && onToggleChat && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggleChat();
+              }}
+              className={`relative flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
+                isChatOpen
+                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-2 ring-sky-500/40 shadow-sky-500/20'
+                  : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 border-zinc-700/60'
+              }`}
+              title="Toggle Room Chat"
+              aria-label="Toggle Room Chat"
+            >
+              <MessageSquare className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400 shrink-0" />
+              <span className="hidden sm:inline">Chat</span>
+              {typeof unreadCount === 'number' && unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+          )}
+
+          {roomCode && !inCall && onStartCall && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onStartCall();
+              }}
+              className={`flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
+                incomingCall
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
+                  : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
+              }`}
+              title={
+                incomingCall
+                  ? `${incomingCall.name} started a call! Click to join`
+                  : 'Join Live Video Call'
+              }
+              aria-label={incomingCall ? 'Join incoming call' : 'Join call'}
+            >
+              <Video
+                className={`w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0 ${incomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
+              />
+              <span className="hidden sm:inline">
+                {incomingCall ? 'Incoming Call - Join' : 'Join Call'}
+              </span>
+            </button>
+          )}
+
+          {roomCode && onLeave && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onLeave();
+              }}
+              className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm shrink-0 touch-manipulation"
+              title="Leave Watch Party"
+              aria-label="Leave Watch Party"
+            >
+              <LogOut className="w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0" />
+              <span className="hidden sm:inline">Leave</span>
+            </button>
+          )}
           {/* Aspect Ratio Menu */}
           {currentMedia.isVideo && (
             <div className="relative">

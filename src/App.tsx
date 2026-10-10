@@ -891,6 +891,14 @@ export default function App() {
             onCaptureScreenshot={handleCaptureScreenshot}
             duckingMultiplier={watchVolumeDuckingMultiplier}
             callStrip={callStripElement}
+            roomCode={watchRoomCode || undefined}
+            isChatOpen={watchIsChatOpen}
+            onToggleChat={() => setWatchChatOpen(!watchIsChatOpen)}
+            unreadCount={watchUnreadCount}
+            inCall={watchInCall}
+            incomingCall={watchIncomingCall}
+            onStartCall={watchStartCall}
+            onLeave={watchLeaveRoom}
           />
         )}
       </main>
