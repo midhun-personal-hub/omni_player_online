@@ -427,7 +427,7 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
           controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         style={{
-          paddingTop: 'max(0.5rem, env(safe-area-inset-top, 0px))',
+          paddingTop: 'max(1.25rem, env(safe-area-inset-top, 0px))',
           paddingLeft: 'max(0.75rem, env(safe-area-inset-left, 0px))',
           paddingRight: 'max(0.75rem, env(safe-area-inset-right, 0px))',
         }}

@@ -744,7 +744,7 @@ const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
           controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
         }`}
         style={{
-          paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))',
+          paddingTop: 'max(1.25rem, env(safe-area-inset-top, 0px))',
           paddingLeft: 'max(1rem, env(safe-area-inset-left, 0px))',
           paddingRight: 'max(1rem, env(safe-area-inset-right, 0px))',
         }}
