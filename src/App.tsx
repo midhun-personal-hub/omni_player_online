@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Film,
   FolderOpen,
@@ -310,6 +311,7 @@ export default function App() {
   const [isFullscreenChatInputOpen, setIsFullscreenChatInputOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const mobileMenuRef = useRef<HTMLDivElement>(null);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     const handleFsChange = () => {
@@ -321,13 +323,33 @@ export default function App() {
 
   useEffect(() => {
     if (!isMobileMenuOpen) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      if (mobileMenuRef.current && !mobileMenuRef.current.contains(e.target as Node)) {
+
+    const handlePointerDown = (e: PointerEvent | MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (
+        mobileMenuRef.current &&
+        !mobileMenuRef.current.contains(target) &&
+        mobileMenuButtonRef.current &&
+        !mobileMenuButtonRef.current.contains(target)
+      ) {
         setIsMobileMenuOpen(false);
       }
     };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsMobileMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [isMobileMenuOpen]);
 
   const callStripElement =
@@ -458,8 +480,8 @@ export default function App() {
         </div>
 
         {/* Global Action Buttons */}
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 min-w-0">
-          {/* Watch Together - Visible on sm: screens and up */}
+        <div className="flex items-center gap-2 shrink-0 min-w-0">
+          {/* Watch Together - Desktop pill (sm: screens and up) */}
           <button
             onClick={() => setIsWatchTogetherOpen(true)}
             className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
@@ -480,11 +502,11 @@ export default function App() {
             )}
           </button>
 
-          {/* Room Chat Button (visible when a watch party is active - both mobile icon and desktop pill) */}
+          {/* Room Chat Button - Desktop only */}
           {watchRole !== null && (
             <button
               onClick={() => setWatchChatOpen(!watchIsChatOpen)}
-              className={`relative flex items-center justify-center gap-1.5 w-10 h-10 p-0 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 ${
+              className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 ${
                 watchIsChatOpen
                   ? 'bg-sky-950/70 text-sky-300 border-sky-600/50'
                   : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
@@ -492,21 +514,21 @@ export default function App() {
               title="Toggle Room Chat"
               aria-label="Toggle Room Chat"
             >
-              <MessageSquare className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400" />
-              <span className="hidden sm:inline">Chat</span>
+              <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
+              <span>Chat</span>
               {watchUnreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 sm:static px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
+                <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
                   {watchUnreadCount}
                 </span>
               )}
             </button>
           )}
 
-          {/* Video Call Button (visible when in watch party and not already in call) */}
+          {/* Video Call Button - Desktop only */}
           {watchRole !== null && !watchInCall && (
             <button
               onClick={watchStartCall}
-              className={`flex items-center justify-center gap-1.5 w-10 h-10 p-0 sm:w-auto sm:h-auto sm:px-3 sm:py-1.5 text-xs font-semibold rounded-lg transition-all shadow-xs shrink-0 ${
+              className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all shadow-xs shrink-0 ${
                 watchIncomingCall
                   ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
                   : 'bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
@@ -519,27 +541,13 @@ export default function App() {
               aria-label={watchIncomingCall ? 'Incoming Call - Join' : 'Join Call'}
             >
               <Video
-                className={`w-4 h-4 sm:w-3.5 sm:h-3.5 ${watchIncomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
+                className={`w-3.5 h-3.5 ${watchIncomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
               />
-              <span className="hidden sm:inline">
-                {watchIncomingCall ? 'Incoming Call - Join' : 'Join Call'}
-              </span>
+              <span>{watchIncomingCall ? 'Incoming Call - Join' : 'Join Call'}</span>
             </button>
           )}
 
-          {/* Open Files - Mobile direct quick-button when not in watch party */}
-          {watchRole === null && (
-            <button
-              onClick={() => headerFileInputRef.current?.click()}
-              className="sm:hidden flex items-center justify-center w-10 h-10 p-0 text-xs font-medium rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/60 transition-colors shadow-xs shrink-0"
-              title="Open local files"
-              aria-label="Open local files"
-            >
-              <FilePlus className="w-4 h-4 text-sky-400" />
-            </button>
-          )}
-
-          {/* Open Files - Hidden input */}
+          {/* Open Files - Hidden input (always mounted outside dropdown) */}
           <input
             type="file"
             ref={headerFileInputRef}
@@ -551,6 +559,7 @@ export default function App() {
             }}
             className="hidden"
           />
+
           {/* Open Files - Desktop */}
           <button
             onClick={() => headerFileInputRef.current?.click()}
@@ -574,6 +583,7 @@ export default function App() {
             }}
             className="hidden"
           />
+
           {/* Open Folder - Desktop */}
           <button
             onClick={() => headerFolderInputRef.current?.click()}
@@ -622,125 +632,174 @@ export default function App() {
             <Keyboard className="w-4 h-4" />
           </button>
 
-          {/* Mobile "More" (three-dots) Menu Container (sm:hidden) */}
-          <div className="relative sm:hidden" ref={mobileMenuRef}>
-            <button
-              onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-              className={`flex items-center justify-center w-10 h-10 p-0 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 ${
-                isMobileMenuOpen
-                  ? 'bg-zinc-700 text-white border-zinc-500'
-                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
-              }`}
-              title="More actions"
-              aria-label="More actions"
-              aria-expanded={isMobileMenuOpen}
-            >
-              <MoreVertical className="w-4 h-4 text-zinc-300" />
-            </button>
-
-            {/* Mobile Dropdown Menu */}
-            {isMobileMenuOpen && (
-              <div
-                className="absolute right-0 top-12 z-50 w-52 rounded-xl bg-zinc-900 border border-zinc-800 p-1.5 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150 space-y-0.5"
-                role="menu"
-                aria-orientation="vertical"
-              >
-                {/* Watch Together / Participants */}
-                <button
-                  onClick={() => {
-                    setIsWatchTogetherOpen(true);
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
-                  role="menuitem"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Users className="w-4 h-4 text-sky-400" />
-                    <span>{watchRole ? 'Watch Party Room' : 'Watch Together'}</span>
-                  </div>
-                  {watchRole === 'host' && (
-                    <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[10px] font-bold">
-                      {watchViewerCount}
-                    </span>
-                  )}
-                </button>
-
-                {/* Add Files */}
-                <button
-                  onClick={() => {
-                    headerFileInputRef.current?.click();
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
-                  role="menuitem"
-                >
-                  <FilePlus className="w-4 h-4 text-sky-400" />
-                  <span>Choose Files</span>
-                </button>
-
-                {/* Folder */}
-                <button
-                  onClick={() => {
-                    headerFolderInputRef.current?.click();
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
-                  role="menuitem"
-                >
-                  <FolderOpen className="w-4 h-4 text-amber-400" />
-                  <span>Open Folder</span>
-                </button>
-
-                {/* Audio & FX */}
-                <button
-                  onClick={() => {
-                    setIsEffectsOpen(true);
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
-                  role="menuitem"
-                >
-                  <Sliders className="w-4 h-4 text-sky-400" />
-                  <span>Audio & Video FX</span>
-                </button>
-
-                {/* Queue / Playlist */}
-                <button
-                  onClick={() => {
-                    setIsPlaylistOpen(!isPlaylistOpen);
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
-                  role="menuitem"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <ListMusic className="w-4 h-4 text-sky-400" />
-                    <span>Queue</span>
-                  </div>
-                  {playlist.length > 0 && (
-                    <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold">
-                      {playlist.length}
-                    </span>
-                  )}
-                </button>
-
-                {/* Keyboard Shortcuts */}
-                <button
-                  onClick={() => {
-                    setIsShortcutsOpen(true);
-                    setIsMobileMenuOpen(false);
-                  }}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px]"
-                  role="menuitem"
-                >
-                  <Keyboard className="w-4 h-4 text-zinc-400" />
-                  <span>Shortcuts (?)</span>
-                </button>
-              </div>
+          {/* Watch Together - Always-visible mobile icon button (40x40px) */}
+          <button
+            onClick={() => setIsWatchTogetherOpen(true)}
+            className={`sm:hidden relative flex items-center justify-center w-10 h-10 p-0 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 touch-manipulation ${
+              watchRole === 'host'
+                ? 'bg-rose-950/60 text-rose-300 border-rose-600/50 shadow-xs'
+                : watchRole === 'guest'
+                ? 'bg-sky-950/60 text-sky-300 border-sky-600/50 shadow-xs'
+                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
+            }`}
+            title={watchRole ? 'Watch Party Room' : 'Watch Together'}
+            aria-label={watchRole ? 'Watch Party Room' : 'Watch Together'}
+          >
+            <Users className="w-4 h-4 text-sky-400" />
+            {/* Green dot active room indicator */}
+            {watchRole !== null && (
+              <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-zinc-900" />
             )}
-          </div>
+            {watchRole === 'host' && watchViewerCount > 0 && (
+              <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-rose-500 text-white text-[9px] font-bold shadow-xs">
+                {watchViewerCount}
+              </span>
+            )}
+          </button>
+
+          {/* Mobile 3-dot "More" Menu Button (40x40px, touch-manipulation) */}
+          <button
+            ref={mobileMenuButtonRef}
+            onClick={(e) => {
+              e.stopPropagation();
+              console.log('[MobileMenu] state toggled:', !isMobileMenuOpen);
+              setIsMobileMenuOpen((prev) => !prev);
+            }}
+            className={`sm:hidden flex items-center justify-center w-10 h-10 p-0 text-xs font-medium rounded-lg border transition-colors shadow-xs shrink-0 touch-manipulation ${
+              isMobileMenuOpen
+                ? 'bg-zinc-700 text-white border-zinc-500'
+                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border-zinc-700/60'
+            }`}
+            title="More actions"
+            aria-label="More actions"
+            aria-expanded={isMobileMenuOpen}
+          >
+            <MoreVertical className="w-4 h-4 text-zinc-300" />
+          </button>
         </div>
       </header>
+
+      {/* Mobile Dropdown Menu rendered via portal to document.body (immune to any header overflow/clipping) */}
+      {isMobileMenuOpen &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={mobileMenuRef}
+            className="fixed right-2 top-14 z-[1000] w-56 max-w-[calc(100vw-16px)] rounded-xl bg-zinc-900/98 border border-zinc-700/80 p-1.5 shadow-2xl backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150 space-y-0.5 text-zinc-200"
+            role="menu"
+            aria-orientation="vertical"
+          >
+            {/* 1. Choose file (First item in menu as requested) */}
+            <button
+              onClick={() => {
+                headerFileInputRef.current?.click();
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px] touch-manipulation"
+              role="menuitem"
+            >
+              <FilePlus className="w-4 h-4 text-sky-400 shrink-0" />
+              <span>Choose file</span>
+            </button>
+
+            {/* 2. Open Folder */}
+            <button
+              onClick={() => {
+                headerFolderInputRef.current?.click();
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px] touch-manipulation"
+              role="menuitem"
+            >
+              <FolderOpen className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Open Folder</span>
+            </button>
+
+            {/* 3. Room Chat (when in watch party) */}
+            {watchRole !== null && (
+              <button
+                onClick={() => {
+                  setWatchChatOpen(!watchIsChatOpen);
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px] touch-manipulation"
+                role="menuitem"
+              >
+                <div className="flex items-center gap-2.5">
+                  <MessageSquare className="w-4 h-4 text-sky-400 shrink-0" />
+                  <span>Room Chat</span>
+                </div>
+                {watchUnreadCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold">
+                    {watchUnreadCount}
+                  </span>
+                )}
+              </button>
+            )}
+
+            {/* 4. Join Video Call (when in watch party and not already in call) */}
+            {watchRole !== null && !watchInCall && (
+              <button
+                onClick={() => {
+                  watchStartCall();
+                  setIsMobileMenuOpen(false);
+                }}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-emerald-300 hover:text-white hover:bg-emerald-500/20 rounded-lg transition-colors text-left font-medium min-h-[40px] touch-manipulation"
+                role="menuitem"
+              >
+                <Video className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>{watchIncomingCall ? 'Join Incoming Call' : 'Join Video Call'}</span>
+              </button>
+            )}
+
+            {/* 5. Audio & Video FX */}
+            <button
+              onClick={() => {
+                setIsEffectsOpen(true);
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px] touch-manipulation"
+              role="menuitem"
+            >
+              <Sliders className="w-4 h-4 text-sky-400 shrink-0" />
+              <span>Audio & Video FX</span>
+            </button>
+
+            {/* 6. Queue / Playlist */}
+            <button
+              onClick={() => {
+                setIsPlaylistOpen(!isPlaylistOpen);
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full flex items-center justify-between px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px] touch-manipulation"
+              role="menuitem"
+            >
+              <div className="flex items-center gap-2.5">
+                <ListMusic className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>Queue</span>
+              </div>
+              {playlist.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold">
+                  {playlist.length}
+                </span>
+              )}
+            </button>
+
+            {/* 7. Keyboard Shortcuts */}
+            <button
+              onClick={() => {
+                setIsShortcutsOpen(true);
+                setIsMobileMenuOpen(false);
+              }}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:text-white hover:bg-zinc-800 rounded-lg transition-colors text-left font-medium min-h-[40px] touch-manipulation"
+              role="menuitem"
+            >
+              <Keyboard className="w-4 h-4 text-zinc-400 shrink-0" />
+              <span>Shortcuts (?)</span>
+            </button>
+          </div>,
+          document.body
+        )}
 
       {/* Incoming Call Alert Banner */}
       {watchRole !== null && watchIncomingCall && !watchInCall && (
