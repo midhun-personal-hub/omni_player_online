@@ -38,6 +38,7 @@ import { formatTime, formatTimeDetailed } from '../utils/formatters';
 import { audioEngine } from '../utils/audioEngine';
 import { AudioVisualizer } from './AudioVisualizer';
 import { parseSubtitleFile } from '../utils/subtitles';
+import { RoomControls } from './RoomControls';
 
 interface VideoPlayerProps {
   currentMedia: MediaItem;
@@ -67,6 +68,7 @@ interface VideoPlayerProps {
   incomingCall?: { active: boolean; name: string } | null;
   onStartCall?: () => void;
   onLeave?: () => void;
+  viewerCount?: number;
 }
 
 const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
@@ -97,6 +99,7 @@ const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
   incomingCall,
   onStartCall,
   onLeave,
+  viewerCount = 0,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mediaRef = useRef<HTMLVideoElement | null>(null);
@@ -113,8 +116,24 @@ const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
+  const [isShortHeight, setIsShortHeight] = useState(window.innerHeight < 420);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const hideControlsTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const handleResize = () => setIsShortHeight(window.innerHeight < 420);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    console.log('[RoomControls Render]', {
+      role: 'host',
+      fullscreenElement: document.fullscreenElement,
+      chatOpen: isChatOpen,
+      roomCode,
+    });
+  }, [isChatOpen, roomCode]);
 
   // Scrubber hover state
   const [hoverTime, setHoverTime] = useState<number | null>(null);
@@ -738,183 +757,195 @@ const VideoPlayerComponent: React.FC<VideoPlayerProps> = ({
         </div>
       )}
 
-      {/* Top Header Controls Bar (Auto-hides) */}
+      {/* Top Overlay Container (Host) */}
       <div
-        className={`absolute top-0 inset-x-0 z-30 p-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent transition-opacity duration-300 flex items-center justify-between ${
-          controlsVisible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+        className={`absolute top-0 inset-x-0 z-50 flex flex-col gap-2 p-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent transition-opacity duration-300 pointer-events-none ${
+          controlsVisible ? 'opacity-100' : 'opacity-0'
         }`}
         style={{
-          paddingTop: 'max(1.25rem, env(safe-area-inset-top, 0px))',
+          paddingTop: 'max(1rem, env(safe-area-inset-top, 0px))',
           paddingLeft: 'max(1rem, env(safe-area-inset-left, 0px))',
           paddingRight: 'max(1rem, env(safe-area-inset-right, 0px))',
         }}
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center gap-3 min-w-0 pr-4">
-          {roomCode ? (
-            <div className="flex items-center gap-2 min-w-0 shrink-0">
-              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shadow-lg whitespace-nowrap">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                <span className="hidden sm:inline">Room</span>
-                <span className="font-mono font-bold text-sky-400">{roomCode}</span>
+        {roomCode && !isShortHeight && (
+          <div className="flex items-center justify-between gap-2 min-w-0 pointer-events-auto">
+            <RoomControls
+              roomCode={roomCode}
+              role="host"
+              viewerCount={viewerCount}
+              isChatOpen={!!isChatOpen}
+              onToggleChat={onToggleChat || (() => {})}
+              unreadCount={unreadCount || 0}
+              inCall={!!inCall}
+              incomingCall={incomingCall}
+              onStartCall={onStartCall || (() => {})}
+              onLeave={onLeave || (() => {})}
+            />
+          </div>
+        )}
+
+        {/* Row 2: Player Info Bar (or Merged Row if short height) */}
+        <div className="flex items-center justify-between gap-2 min-w-0 pointer-events-auto">
+          {isShortHeight && roomCode ? (
+            <div className="flex items-center justify-between w-full gap-2 min-w-0">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <div className="flex items-center gap-1 px-2 py-1 rounded-full bg-zinc-900/90 border border-zinc-700/60 text-xs font-medium text-zinc-200 backdrop-blur-md shrink-0">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                  <span className="font-mono font-bold text-sky-400">{roomCode}</span>
+                </div>
+                {onToggleChat && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onToggleChat(); }}
+                    className={`relative flex items-center justify-center w-9 h-9 rounded-lg border transition-all ${
+                      isChatOpen ? 'bg-sky-500/20 text-sky-300 border-sky-500/50' : 'bg-zinc-900/90 text-zinc-200 border-zinc-700/60'
+                    }`}
+                    title="Chat"
+                  >
+                    <MessageSquare className="w-4 h-4 text-sky-400" />
+                    {typeof unreadCount === 'number' && unreadCount > 0 && (
+                      <span className="absolute -top-1 -right-1 px-1 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[9px] font-bold">
+                        {unreadCount}
+                      </span>
+                    )}
+                  </button>
+                )}
+                {!inCall && onStartCall && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onStartCall(); }}
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                    title="Join Call"
+                  >
+                    <Video className="w-4 h-4 text-emerald-400" />
+                  </button>
+                )}
+                {onLeave && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onLeave(); }}
+                    className="flex items-center justify-center w-9 h-9 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                    title="Leave"
+                  >
+                    <LogOut className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {currentMedia.isVideo && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setShowAspectMenu(!showAspectMenu); }}
+                    className="px-2 py-1 text-[11px] text-zinc-300 rounded-lg bg-zinc-900/80 border border-zinc-800 uppercase font-mono"
+                  >
+                    {aspectRatio}
+                  </button>
+                )}
+                {currentMedia.isVideo && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); captureScreenshot(); }}
+                    className="p-2 text-zinc-300 rounded-lg bg-zinc-900/80 border border-zinc-800"
+                    title="Screenshot"
+                  >
+                    <Camera className="w-4 h-4 text-sky-400" />
+                  </button>
+                )}
+                <button
+                  onClick={(e) => { e.stopPropagation(); onOpenInfo(); }}
+                  className="p-2 text-zinc-300 rounded-lg bg-zinc-900/80 border border-zinc-800"
+                  title="Info"
+                >
+                  <Info className="w-4 h-4" />
+                </button>
               </div>
             </div>
           ) : (
-            <div className="truncate">
-              <h1 className="text-sm font-semibold text-white tracking-wide truncate">
-                {currentMedia.name}
-              </h1>
-              <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mt-0.5">
-                <span className="uppercase text-sky-400 font-semibold">{currentMedia.extension}</span>
-                <span>·</span>
-                <span>Local Storage Playback</span>
-                {currentMedia.width && currentMedia.height && (
-                  <>
+            <div className="flex items-center justify-between w-full gap-2 min-w-0">
+              <div className="flex items-center gap-2 min-w-0 flex-1 pr-2">
+                <div className="truncate">
+                  <h1 className="text-sm font-semibold text-white tracking-wide truncate">
+                    {currentMedia.name}
+                  </h1>
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono mt-0.5">
+                    <span className="uppercase text-sky-400 font-semibold">{currentMedia.extension}</span>
                     <span>·</span>
-                    <span>
-                      {currentMedia.width}×{currentMedia.height}
-                    </span>
-                  </>
+                    <span>Local Storage Playback</span>
+                    {currentMedia.width && currentMedia.height && (
+                      <>
+                        <span>·</span>
+                        <span>{currentMedia.width}×{currentMedia.height}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {currentMedia.isVideo && (
+                  <div className="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowAspectMenu(!showAspectMenu);
+                        setShowSpeedMenu(false);
+                        setShowSubMenu(false);
+                      }}
+                      className="px-2.5 py-1.5 text-xs text-zinc-300 hover:text-white rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800/80 transition-colors uppercase font-mono"
+                      title="Aspect Ratio"
+                    >
+                      {aspectRatio}
+                    </button>
+                    {showAspectMenu && (
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        className="absolute right-0 top-full mt-2 w-36 bg-zinc-900/95 border border-zinc-800 rounded-xl shadow-2xl py-1 z-40 backdrop-blur-md"
+                      >
+                        {(['original', '16:9', '4:3', '21:9', 'cover', 'fill'] as AspectRatioMode[]).map(
+                          (mode) => (
+                            <button
+                              key={mode}
+                              onClick={() => {
+                                onAspectRatioChange(mode);
+                                setShowAspectMenu(false);
+                                showToast(`Aspect: ${mode}`);
+                              }}
+                              className={`w-full px-3 py-1.5 text-left text-xs capitalize transition-colors ${
+                                aspectRatio === mode
+                                  ? 'text-sky-400 font-semibold bg-sky-950/40'
+                                  : 'text-zinc-300 hover:bg-zinc-800'
+                              }`}
+                            >
+                              {mode}
+                            </button>
+                          )
+                        )}
+                      </div>
+                    )}
+                  </div>
                 )}
+                {currentMedia.isVideo && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      captureScreenshot();
+                    }}
+                    className="p-2 text-zinc-300 hover:text-white rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800/80 transition-colors"
+                    title="Take Snapshot (S)"
+                  >
+                    <Camera className="w-4 h-4 text-sky-400" />
+                  </button>
+                )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenInfo();
+                  }}
+                  className="p-2 text-zinc-300 hover:text-white rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800/80 transition-colors"
+                  title="Media Metadata & Details"
+                >
+                  <Info className="w-4 h-4" />
+                </button>
               </div>
             </div>
           )}
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          {roomCode && onToggleChat && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onToggleChat();
-              }}
-              className={`relative flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
-                isChatOpen
-                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 ring-2 ring-sky-500/40 shadow-sky-500/20'
-                  : 'bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 border-zinc-700/60'
-              }`}
-              title="Toggle Room Chat"
-              aria-label="Toggle Room Chat"
-            >
-              <MessageSquare className="w-4 h-4 sm:w-3.5 sm:h-3.5 text-sky-400 shrink-0" />
-              <span className="hidden sm:inline">Chat</span>
-              {typeof unreadCount === 'number' && unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-sky-500 text-zinc-950 text-[10px] font-bold shadow-sm">
-                  {unreadCount}
-                </span>
-              )}
-            </button>
-          )}
-
-          {roomCode && !inCall && onStartCall && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onStartCall();
-              }}
-              className={`flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-semibold rounded-lg transition-all backdrop-blur-md shadow-sm shrink-0 touch-manipulation ${
-                incomingCall
-                  ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border border-emerald-400 ring-2 ring-emerald-400/60 animate-pulse'
-                  : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40'
-              }`}
-              title={
-                incomingCall
-                  ? `${incomingCall.name} started a call! Click to join`
-                  : 'Join Live Video Call'
-              }
-              aria-label={incomingCall ? 'Join incoming call' : 'Join call'}
-            >
-              <Video
-                className={`w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0 ${incomingCall ? 'text-zinc-950' : 'text-emerald-400'}`}
-              />
-              <span className="hidden sm:inline">
-                {incomingCall ? 'Incoming Call - Join' : 'Join Call'}
-              </span>
-            </button>
-          )}
-
-          {roomCode && onLeave && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onLeave();
-              }}
-              className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] w-10 sm:w-auto h-10 px-0 sm:px-3 py-1.5 text-xs font-medium rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 transition-colors backdrop-blur-md shadow-sm shrink-0 touch-manipulation"
-              title="Leave Watch Party"
-              aria-label="Leave Watch Party"
-            >
-              <LogOut className="w-4 h-4 sm:w-3.5 sm:h-3.5 shrink-0" />
-              <span className="hidden sm:inline">Leave</span>
-            </button>
-          )}
-          {/* Aspect Ratio Menu */}
-          {currentMedia.isVideo && (
-            <div className="relative">
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setShowAspectMenu(!showAspectMenu);
-                  setShowSpeedMenu(false);
-                  setShowSubMenu(false);
-                }}
-                className="px-2.5 py-1.5 text-xs text-zinc-300 hover:text-white rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800/80 transition-colors uppercase font-mono"
-                title="Aspect Ratio"
-              >
-                {aspectRatio}
-              </button>
-              {showAspectMenu && (
-                <div
-                  onClick={(e) => e.stopPropagation()}
-                  className="absolute right-0 top-full mt-2 w-36 bg-zinc-900/95 border border-zinc-800 rounded-xl shadow-2xl py-1 z-40 backdrop-blur-md"
-                >
-                  {(['original', '16:9', '4:3', '21:9', 'cover', 'fill'] as AspectRatioMode[]).map(
-                    (mode) => (
-                      <button
-                        key={mode}
-                        onClick={() => {
-                          onAspectRatioChange(mode);
-                          setShowAspectMenu(false);
-                          showToast(`Aspect: ${mode}`);
-                        }}
-                        className={`w-full px-3 py-1.5 text-left text-xs capitalize transition-colors ${
-                          aspectRatio === mode
-                            ? 'text-sky-400 font-semibold bg-sky-950/40'
-                            : 'text-zinc-300 hover:bg-zinc-800'
-                        }`}
-                      >
-                        {mode}
-                      </button>
-                    )
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Screenshot Button */}
-          {currentMedia.isVideo && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                captureScreenshot();
-              }}
-              className="p-2 text-zinc-300 hover:text-white rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800/80 transition-colors"
-              title="Take Snapshot (S)"
-            >
-              <Camera className="w-4 h-4 text-sky-400" />
-            </button>
-          )}
-
-          {/* Info Modal Button */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenInfo();
-            }}
-            className="p-2 text-zinc-300 hover:text-white rounded-lg bg-zinc-900/80 hover:bg-zinc-800 border border-zinc-800/80 transition-colors"
-            title="Media Metadata & Details"
-          >
-            <Info className="w-4 h-4" />
-          </button>
         </div>
       </div>
 

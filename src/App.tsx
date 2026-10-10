@@ -34,7 +34,6 @@ import { EmptyState } from './components/EmptyState';
 import { VideoPlayer } from './components/VideoPlayer';
 import { PlaylistDrawer } from './components/PlaylistDrawer';
 import { BookmarksDrawer } from './components/BookmarksDrawer';
-import { RoomBar } from './components/RoomBar';
 import { EffectsModal } from './components/EffectsModal';
 import { ShortcutsModal } from './components/ShortcutsModal';
 import { MediaInfoModal } from './components/MediaInfoModal';
@@ -44,6 +43,8 @@ import { GuestPlayer } from './components/GuestPlayer';
 import { ChatDrawer } from './components/ChatDrawer';
 import { FullscreenChatOverlay } from './components/FullscreenChatOverlay';
 import { CallStrip } from './components/CallStrip';
+import { RoomControls } from './components/RoomControls';
+import { AppNotifications } from './components/AppNotifications';
 import { useWatchParty } from './hooks/useWatchParty';
 
 export default function App() {
@@ -504,6 +505,22 @@ export default function App() {
             )}
           </button>
 
+          {/* Room Controls (Lobby / no video playing) */}
+          {watchRole === 'host' && (playlist.length === 0 || !currentMedia) && watchRoomCode && (
+            <RoomControls
+              roomCode={watchRoomCode}
+              role={watchRole}
+              viewerCount={watchViewerCount}
+              isChatOpen={watchIsChatOpen}
+              onToggleChat={() => setWatchChatOpen(!watchIsChatOpen)}
+              unreadCount={watchUnreadCount}
+              inCall={watchInCall}
+              incomingCall={watchIncomingCall}
+              onStartCall={watchStartCall}
+              onLeave={watchLeaveRoom}
+            />
+          )}
+
           {/* Open Files - Hidden input (always mounted outside dropdown) */}
           <input
             type="file"
@@ -635,58 +652,6 @@ export default function App() {
           </button>
         </div>
       </header>
-
-      {/* Normal flow Room Bar when in room (lobby / empty state) */}
-      {watchRole !== null && (playlist.length === 0 || !currentMedia || watchRole === 'guest') && (
-        <RoomBar
-          roomCode={watchRoomCode || ''}
-          isChatOpen={watchIsChatOpen}
-          onToggleChat={() => setWatchChatOpen(!watchIsChatOpen)}
-          unreadCount={watchUnreadCount}
-          inCall={watchInCall}
-          incomingCall={watchIncomingCall}
-          onStartCall={watchStartCall}
-          onLeave={watchLeaveRoom}
-        />
-      )}
-
-      {/* Incoming Call Alert Banner in normal document flow below room bar */}
-      {watchRole !== null && watchIncomingCall && !watchInCall && (
-        <aside
-          role="status"
-          aria-label="Incoming video call"
-          className="relative z-20 mx-3 sm:mx-4 mt-2 flex items-center justify-between gap-3 p-3 bg-zinc-900/90 border border-emerald-500/60 rounded-xl shadow-lg backdrop-blur-md animate-in slide-in-from-top duration-200"
-        >
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
-              <span className="absolute w-full h-full rounded-full bg-emerald-400/40 animate-ping" />
-              <Video className="w-4 h-4 text-emerald-400" />
-            </div>
-            <div className="text-xs min-w-0">
-              <p className="font-semibold text-white truncate">
-                {watchIncomingCall.name} started a video call
-              </p>
-              <p className="text-[11px] text-zinc-400 truncate">Join to chat with camera & microphone</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              onClick={watchStartCall}
-              className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 transition-colors shadow-md shadow-emerald-950/40 min-h-[36px]"
-            >
-              <Video className="w-3.5 h-3.5" />
-              <span>Join</span>
-            </button>
-            <button
-              onClick={watchDismissIncomingCall}
-              className="p-1.5 text-zinc-400 hover:text-zinc-200 rounded-lg hover:bg-zinc-800 transition-colors min-w-[36px] min-h-[36px] flex items-center justify-center"
-              title="Dismiss banner"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </aside>
-      )}
 
       {/* Mobile Dropdown Menu rendered via portal to document.body (immune to any header overflow/clipping) */}
       {isMobileMenuOpen &&
@@ -869,6 +834,7 @@ export default function App() {
             incomingCall={watchIncomingCall}
             onStartCall={watchStartCall}
             onLeave={watchLeaveRoom}
+            viewerCount={watchViewerCount}
           />
         )}
       </main>
@@ -996,6 +962,20 @@ export default function App() {
           isInputOpen={isFullscreenChatInputOpen}
           onToggleInput={setIsFullscreenChatInputOpen}
           myId={watchMyId}
+        />
+      )}
+
+      {/* Unified App Notifications (Toasts & Call Alerts) */}
+      {watchRole !== null && (
+        <AppNotifications
+          messages={watchMessages}
+          isChatOpen={watchIsChatOpen}
+          onOpenChat={() => setWatchChatOpen(true)}
+          myId={watchMyId}
+          incomingCall={watchIncomingCall}
+          inCall={watchInCall}
+          onStartCall={watchStartCall}
+          onDismissCall={watchDismissIncomingCall}
         />
       )}
 
