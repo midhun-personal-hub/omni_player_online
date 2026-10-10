@@ -1,0 +1,947 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  watchPartyService,
+  WatchPartyRole,
+  WatchPartyStatus,
+  WatchPartyCommand,
+} from '../utils/watchParty';
+import { SubtitleTrack } from '../types/media';
+import { ChatMessage } from '../types/chat';
+import { playChatNotificationSound } from '../utils/chatSound';
+import { audioEngine } from '../utils/audioEngine';
+import {
+  CallManager,
+  RemoteParticipant,
+  CallQuality,
+  CallDevices,
+} from '../utils/callManager';
+
+interface HostMediaState {
+  isPlaying: boolean;
+  currentTime: number;
+  duration: number;
+  playbackRate: number;
+  mediaName: string;
+  isAudio: boolean;
+  allowGuestControl: boolean;
+}
+
+function sanitizeChatText(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const stripped = raw.replace(/[\x00-\x1F\x7F-\x9F\u200B-\u200D\uFEFF]/g, '');
+  return stripped.trim().slice(0, 500);
+}
+
+function sanitizeChatName(raw: unknown, defaultName = 'Guest'): string {
+  if (typeof raw !== 'string') return defaultName;
+  const stripped = raw.replace(/[\x00-\x1F\x7F-\x9F\u200B-\u200D\uFEFF]/g, '');
+  const trimmed = stripped.trim().slice(0, 20);
+  return trimmed || defaultName;
+}
+
+export function useWatchParty(options?: {
+  mediaElement?: HTMLMediaElement | null;
+  currentMediaUrl?: string;
+  mediaTitle?: string;
+  isAudio?: boolean;
+  activeSubtitleTrack?: SubtitleTrack | null;
+  onToast?: (msg: string) => void;
+}) {
+  const {
+    mediaElement,
+    currentMediaUrl,
+    mediaTitle = 'Media',
+    isAudio = false,
+    activeSubtitleTrack = null,
+    onToast,
+  } = options || {};
+
+  const [role, setRole] = useState<WatchPartyRole>(watchPartyService.getRole());
+  const [roomCode, setRoomCode] = useState<string | null>(watchPartyService.getRoomCode());
+  const [status, setStatus] = useState<WatchPartyStatus>(watchPartyService.getStatus());
+  const [errorMessage, setErrorMessage] = useState<string | null>(watchPartyService.getErrorMessage());
+  const [viewerCount, setViewerCount] = useState<number>(watchPartyService.getViewerCount());
+  const [allowGuestControl, setAllowGuestControl] = useState<boolean>(true);
+
+  // Keep references to prevent stale closures
+  const roleRef = useRef<WatchPartyRole>(role);
+  roleRef.current = role;
+
+  const allowGuestControlRef = useRef<boolean>(allowGuestControl);
+  allowGuestControlRef.current = allowGuestControl;
+
+  const mediaElementRef = useRef<HTMLMediaElement | null>(mediaElement || null);
+  useEffect(() => {
+    if (mediaElement) {
+      mediaElementRef.current = mediaElement;
+    }
+  }, [mediaElement]);
+
+  const getMediaElement = useCallback((): HTMLMediaElement | null => {
+    if (mediaElementRef.current) return mediaElementRef.current;
+    if (mediaElement) return mediaElement;
+    if (typeof document !== 'undefined') {
+      return document.querySelector('video, audio') as HTMLMediaElement | null;
+    }
+    return null;
+  }, [mediaElement]);
+
+  // Guest-specific state
+  const [incomingStream, setIncomingStream] = useState<MediaStream | null>(watchPartyService.getIncomingStream());
+  const [isReconnecting, setIsReconnecting] = useState<boolean>(false);
+  const [guestSubtitleTrack, setGuestSubtitleTrack] = useState<SubtitleTrack | null>(null);
+  const [hostState, setHostState] = useState<HostMediaState>({
+    isPlaying: false,
+    currentTime: 0,
+    duration: 0,
+    playbackRate: 1,
+    mediaName: '',
+    isAudio: false,
+    allowGuestControl: true,
+  });
+
+  // Chat state
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  messagesRef.current = messages;
+
+  const [unreadCount, setUnreadCount] = useState<number>(0);
+  const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
+  const isChatOpenRef = useRef<boolean>(false);
+  isChatOpenRef.current = isChatOpen;
+
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('omniplay-chat-sound') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const soundEnabledRef = useRef<boolean>(soundEnabled);
+  soundEnabledRef.current = soundEnabled;
+
+  // Video Call State
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteParticipant>>(new Map());
+  const [inCall, setInCall] = useState<boolean>(false);
+  const [camEnabled, setCamEnabled] = useState<boolean>(true);
+  const [micEnabled, setMicEnabled] = useState<boolean>(true);
+  const [callDevices, setCallDevices] = useState<CallDevices>({ audioInputs: [], videoInputs: [] });
+  const [callQuality, setCallQualityState] = useState<CallQuality>('medium');
+  const [isDuckingEnabled, setIsDuckingEnabledState] = useState<boolean>(true);
+  const [bandwidthSaver, setBandwidthSaver] = useState<boolean>(false);
+  const [hostStutterWarning, setHostStutterWarning] = useState<boolean>(false);
+  const [callError, setCallError] = useState<string | null>(null);
+  const [volumeDuckingMultiplier, setVolumeDuckingMultiplier] = useState<number>(1.0);
+
+  const callManagerRef = useRef<CallManager | null>(null);
+
+  // Host-side participant registry & rate limiting
+  const participantsRef = useRef<Map<string, string>>(new Map()); // peerId -> displayName
+  const guestSeqRef = useRef<number>(1);
+  const rateLimitMapRef = useRef<Map<string, { lastTime: number; timestamps: number[] }>>(new Map());
+
+  const getSavedDisplayName = useCallback((): string => {
+    try {
+      return localStorage.getItem('omniplay-chat-name') || '';
+    } catch {
+      return '';
+    }
+  }, []);
+
+  const lastHeartbeatRef = useRef<number>(Date.now());
+  const isRemoteExecutingRef = useRef<boolean>(false);
+
+  // Initialize CallManager once
+  if (!callManagerRef.current) {
+    callManagerRef.current = new CallManager({
+      onRemoteStreamsChange: (streams) => setRemoteStreams(streams),
+      onLocalStreamChange: (stream) => setLocalStream(stream),
+      onCallStateChange: (active) => setInCall(active),
+      onMediaStateChange: (cam, mic) => {
+        setCamEnabled(cam);
+        setMicEnabled(mic);
+        watchPartyService.sendCommand({
+          type: 'media-state',
+          camOn: cam,
+          micOn: mic,
+        });
+      },
+      onSpeakingChange: (_anyoneSpeaking, multiplier) => {
+        setVolumeDuckingMultiplier(multiplier);
+      },
+      onStutterWarning: (show) => setHostStutterWarning(show),
+      onDevicesChange: (devs) => setCallDevices(devs),
+      onToast: (msg) => onToast?.(msg),
+      onError: (err) => setCallError(err),
+    });
+  }
+
+  // Update CallManager peer identity on room / role changes
+  useEffect(() => {
+    if (callManagerRef.current) {
+      callManagerRef.current.setPeer(
+        watchPartyService.getPeer(),
+        watchPartyService.getMyPeerId(),
+        getSavedDisplayName() || (role === 'host' ? 'Host' : 'Guest')
+      );
+    }
+  }, [role, status, getSavedDisplayName]);
+
+  // Hook into camera calls and roster events from watchPartyService
+  useEffect(() => {
+    const unsubCam = watchPartyService.onCameraCall((call) => {
+      callManagerRef.current?.handleIncomingCall(call);
+    });
+    const unsubRoster = watchPartyService.onRoster((peers) => {
+      callManagerRef.current?.setRoster(peers);
+    });
+    return () => {
+      unsubCam();
+      unsubRoster();
+    };
+  }, []);
+
+  // Host rate limiter (max 1 msg per 500ms, max 20 msgs per 30s)
+  const checkRateLimit = useCallback((senderPeerId: string): boolean => {
+    const now = Date.now();
+    let record = rateLimitMapRef.current.get(senderPeerId);
+    if (!record) {
+      record = { lastTime: 0, timestamps: [] };
+      rateLimitMapRef.current.set(senderPeerId, record);
+    }
+    if (now - record.lastTime < 500) {
+      return false;
+    }
+    record.timestamps = record.timestamps.filter((t) => now - t < 30000);
+    if (record.timestamps.length >= 20) {
+      return false;
+    }
+    record.lastTime = now;
+    record.timestamps.push(now);
+    return true;
+  }, []);
+
+  // Host: broadcast current state helper
+  const broadcastCurrentState = useCallback(() => {
+    const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+    if (!isHost) return;
+    const el = getMediaElement();
+    const currentState: HostMediaState = {
+      isPlaying: el ? !el.paused : false,
+      currentTime: el ? el.currentTime : 0,
+      duration: el ? (Number.isFinite(el.duration) ? el.duration : 0) : 0,
+      playbackRate: el ? el.playbackRate : 1,
+      mediaName: mediaTitle,
+      isAudio: !!isAudio,
+      allowGuestControl: allowGuestControlRef.current,
+    };
+    watchPartyService.sendCommand({
+      type: 'state',
+      ...currentState,
+    });
+  }, [getMediaElement, mediaTitle, isAudio]);
+
+  // Broadcast a chat message to all participants (host-side)
+  const hostBroadcastChatMessage = useCallback((msg: ChatMessage) => {
+    setMessages((prev) => {
+      const next = [...prev, msg].slice(-200);
+      messagesRef.current = next;
+      return next;
+    });
+
+    watchPartyService.sendCommand({
+      type: 'chat-msg',
+      msg,
+    });
+
+    if (msg.fromId !== 'host' && !isChatOpenRef.current) {
+      setUnreadCount((c) => c + 1);
+      if (!document.fullscreenElement) {
+        onToast?.(`${msg.from}: ${msg.text}`);
+      }
+      if (soundEnabledRef.current) {
+        playChatNotificationSound();
+      }
+    }
+  }, [onToast]);
+
+  // Sync service state with local react state
+  useEffect(() => {
+    const unsubStatus = watchPartyService.onStatus((newStatus, errorMsg) => {
+      setStatus(newStatus);
+      setRole(watchPartyService.getRole());
+      setRoomCode(watchPartyService.getRoomCode());
+      setErrorMessage(errorMsg || null);
+    });
+
+    const unsubCount = watchPartyService.onViewerCount((count) => {
+      setViewerCount(count);
+    });
+
+    const unsubStream = watchPartyService.onStream((stream) => {
+      setIncomingStream(stream);
+    });
+
+    const unsubFriendLeft = watchPartyService.onFriendLeft((peerId) => {
+      const guestName = participantsRef.current.get(peerId);
+      if (guestName && roleRef.current === 'host') {
+        const sysMsg: ChatMessage = {
+          id: crypto.randomUUID(),
+          from: 'System',
+          fromId: 'system',
+          text: `${guestName} left`,
+          ts: Date.now(),
+          kind: 'system',
+        };
+        hostBroadcastChatMessage(sysMsg);
+        participantsRef.current.delete(peerId);
+      }
+    });
+
+    return () => {
+      unsubStatus();
+      unsubCount();
+      unsubStream();
+      unsubFriendLeft();
+    };
+  }, [hostBroadcastChatMessage]);
+
+  // Host: update captured media stream
+  const updateCapturedStream = useCallback(() => {
+    const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+    if (!isHost) return;
+
+    const el = getMediaElement();
+    if (!el) return;
+
+    try {
+      // Check 1: Host player must only use src (the blob/object URL).
+      // captureStream() is read from it, NEVER assigned back to host element's srcObject.
+      const mediaEl = el as unknown as {
+        captureStream?: () => MediaStream;
+        mozCaptureStream?: () => MediaStream;
+        srcObject?: MediaStream | null;
+      };
+
+      if (mediaEl.srcObject) {
+        console.warn('[OmniPlay Host] Clearing unexpected srcObject on host media element');
+        mediaEl.srcObject = null;
+      }
+
+      const captured: MediaStream | null = mediaEl.captureStream
+        ? mediaEl.captureStream()
+        : mediaEl.mozCaptureStream
+        ? mediaEl.mozCaptureStream()
+        : null;
+
+      const audioTrack = audioEngine.getCaptureAudioTrack();
+      const combined = new MediaStream();
+
+      if (!isAudio && captured) {
+        captured.getVideoTracks().forEach((vt) => combined.addTrack(vt));
+      }
+
+      if (audioTrack) {
+        combined.addTrack(audioTrack);
+      } else if (captured && captured.getAudioTracks().length > 0) {
+        captured.getAudioTracks().forEach((at) => combined.addTrack(at));
+      }
+
+      // Pass captured stream exclusively to watchPartyService for peer streaming
+      watchPartyService.setCurrentMediaStream(combined);
+    } catch (err) {
+      console.warn('Failed to capture stream for WatchParty:', err);
+    }
+  }, [getMediaElement, isAudio]);
+
+  useEffect(() => {
+    updateCapturedStream();
+  }, [updateCapturedStream, currentMediaUrl]);
+
+  // Host: Heartbeat interval (every 2 seconds)
+  useEffect(() => {
+    if (role !== 'host') return;
+
+    const timer = setInterval(() => {
+      if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+        const el = getMediaElement();
+        watchPartyService.sendCommand({
+          type: 'heartbeat',
+          timestamp: Date.now(),
+          isPlaying: el ? !el.paused : false,
+          currentTime: el ? el.currentTime : 0,
+          duration: el ? (Number.isFinite(el.duration) ? el.duration : 0) : 0,
+          playbackRate: el ? el.playbackRate : 1,
+          mediaName: mediaTitle,
+          isAudio: !!isAudio,
+          allowGuestControl: allowGuestControlRef.current,
+        });
+      }
+    }, 2000);
+
+    return () => clearInterval(timer);
+  }, [role, getMediaElement, mediaTitle, isAudio]);
+
+  // Host: Broadcast subtitles when changed
+  useEffect(() => {
+    if (role !== 'host') return;
+    watchPartyService.sendCommand({
+      type: 'subtitles',
+      track: activeSubtitleTrack
+        ? {
+            name: activeSubtitleTrack.name,
+            cues: activeSubtitleTrack.cues,
+            delaySeconds: activeSubtitleTrack.delaySeconds,
+          }
+        : null,
+    });
+  }, [role, activeSubtitleTrack]);
+
+  // Command handlers
+  useEffect(() => {
+    const unsubCmd = watchPartyService.onCommand((cmd: WatchPartyCommand, senderPeerId: string) => {
+      if (cmd.type === 'heartbeat' || cmd.type === 'state') {
+        lastHeartbeatRef.current = Date.now();
+        setIsReconnecting(false);
+        setHostState({
+          isPlaying: cmd.isPlaying,
+          currentTime: cmd.currentTime,
+          duration: cmd.duration,
+          playbackRate: cmd.playbackRate,
+          mediaName: cmd.mediaName,
+          isAudio: cmd.isAudio,
+          allowGuestControl: cmd.allowGuestControl,
+        });
+      } else if (cmd.type === 'request-state') {
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          broadcastCurrentState();
+        }
+      } else if (cmd.type === 'subtitles') {
+        if (cmd.track) {
+          setGuestSubtitleTrack({
+            id: 'synced-subtitles',
+            name: cmd.track.name,
+            cues: cmd.track.cues,
+            delaySeconds: cmd.track.delaySeconds,
+          });
+        } else {
+          setGuestSubtitleTrack(null);
+        }
+      } else if (cmd.type === 'control') {
+        // Host applies guest control
+        const el = getMediaElement();
+        const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+        if (isHost && allowGuestControlRef.current && el) {
+          isRemoteExecutingRef.current = true;
+          try {
+            if (cmd.action === 'play') {
+              audioEngine.resume();
+              el.play()
+                .then(() => {
+                  broadcastCurrentState();
+                })
+                .catch((err) => {
+                  console.warn('Host play error:', err);
+                  broadcastCurrentState();
+                });
+            } else if (cmd.action === 'pause') {
+              el.pause();
+              broadcastCurrentState();
+            } else if (cmd.action === 'seek' && typeof cmd.time === 'number') {
+              el.currentTime = cmd.time;
+              broadcastCurrentState();
+            } else if (cmd.action === 'rate' && typeof cmd.rate === 'number') {
+              el.playbackRate = cmd.rate;
+              broadcastCurrentState();
+            }
+          } finally {
+            setTimeout(() => {
+              isRemoteExecutingRef.current = false;
+              broadcastCurrentState();
+            }, 100);
+          }
+        }
+      } else if (cmd.type === 'hello') {
+        // Host greets new guest, registers sanitized display name, sends chat history, broadcasts system msg
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          const desired = sanitizeChatName(cmd.name, `Guest ${guestSeqRef.current++}`);
+          const existing = new Set(
+            Array.from(participantsRef.current.values()).map((n) => n.toLowerCase())
+          );
+          existing.add((getSavedDisplayName() || 'Host').toLowerCase());
+          let unique = desired;
+          let counter = 2;
+          while (existing.has(unique.toLowerCase())) {
+            unique = `${desired} (${counter++})`;
+          }
+          participantsRef.current.set(senderPeerId, unique);
+          watchPartyService.setClientName(senderPeerId, unique);
+
+          // Send last 50 chat history messages to new participant
+          watchPartyService.sendToPeer(senderPeerId, {
+            type: 'chat-history',
+            messages: messagesRef.current.slice(-50),
+          });
+
+          // Broadcast system message to all
+          const sysMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            from: 'System',
+            fromId: 'system',
+            text: `${unique} joined`,
+            ts: Date.now(),
+            kind: 'system',
+          };
+          hostBroadcastChatMessage(sysMsg);
+        }
+      } else if (cmd.type === 'rename') {
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          const oldName = participantsRef.current.get(senderPeerId) || 'Guest';
+          const desired = sanitizeChatName(cmd.name, oldName);
+          const existing = new Set(
+            Array.from(participantsRef.current.values()).map((n) => n.toLowerCase())
+          );
+          existing.add((getSavedDisplayName() || 'Host').toLowerCase());
+          existing.delete(oldName.toLowerCase());
+          let unique = desired;
+          let counter = 2;
+          while (existing.has(unique.toLowerCase())) {
+            unique = `${desired} (${counter++})`;
+          }
+          participantsRef.current.set(senderPeerId, unique);
+          watchPartyService.setClientName(senderPeerId, unique);
+
+          const sysMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            from: 'System',
+            fromId: 'system',
+            text: `${oldName} is now ${unique}`,
+            ts: Date.now(),
+            kind: 'system',
+          };
+          hostBroadcastChatMessage(sysMsg);
+        }
+      } else if (cmd.type === 'chat') {
+        // Host validates guest message, rate-limits, and broadcasts to everyone
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          if (typeof cmd.text !== 'string') return;
+          const clean = sanitizeChatText(cmd.text);
+          if (!clean) return;
+
+          if (!checkRateLimit(senderPeerId)) {
+            watchPartyService.sendToPeer(senderPeerId, {
+              type: 'chat-error',
+              reason: 'Slow down',
+            });
+            return;
+          }
+
+          const fromName = participantsRef.current.get(senderPeerId) || 'Guest';
+          const userMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            from: fromName,
+            fromId: senderPeerId,
+            text: clean,
+            ts: Date.now(),
+            kind: 'user',
+          };
+          hostBroadcastChatMessage(userMsg);
+        }
+      } else if (cmd.type === 'chat-msg') {
+        // Guest receives broadcast message
+        if (roleRef.current === 'guest' || watchPartyService.getRole() === 'guest') {
+          setMessages((prev) => {
+            const next = [...prev, cmd.msg].slice(-200);
+            messagesRef.current = next;
+            return next;
+          });
+
+          const myPeerId = watchPartyService.getMyPeerId() || 'guest';
+          if (cmd.msg.fromId !== myPeerId) {
+            if (!isChatOpenRef.current) {
+              setUnreadCount((c) => c + 1);
+              if (!document.fullscreenElement) {
+                onToast?.(`${cmd.msg.from}: ${cmd.msg.text}`);
+              }
+              if (soundEnabledRef.current) {
+                playChatNotificationSound();
+              }
+            }
+          }
+        }
+      } else if (cmd.type === 'chat-history') {
+        if (roleRef.current === 'guest' || watchPartyService.getRole() === 'guest') {
+          const list = Array.isArray(cmd.messages) ? cmd.messages.slice(-200) : [];
+          setMessages(list);
+          messagesRef.current = list;
+        }
+      } else if (cmd.type === 'chat-error') {
+        setChatError(cmd.reason || 'Slow down');
+        setTimeout(() => {
+          setChatError((prev) => (prev === cmd.reason ? null : prev));
+        }, 2500);
+      } else if (cmd.type === 'media-state') {
+        // Forward if host, update callManager
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          watchPartyService.sendCommand({
+            type: 'media-state',
+            senderId: senderPeerId,
+            camOn: cmd.camOn,
+            micOn: cmd.micOn,
+          });
+          callManagerRef.current?.updateParticipantMediaState(senderPeerId, cmd.camOn, cmd.micOn);
+        } else {
+          callManagerRef.current?.updateParticipantMediaState(
+            cmd.senderId || 'host',
+            cmd.camOn,
+            cmd.micOn
+          );
+        }
+      } else if (cmd.type === 'call-join') {
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          watchPartyService.sendCommand({
+            type: 'call-join',
+            peerId: senderPeerId,
+          });
+          callManagerRef.current?.onPeerJoinedCall(senderPeerId);
+        } else {
+          callManagerRef.current?.onPeerJoinedCall(cmd.peerId || 'host');
+        }
+      } else if (cmd.type === 'call-leave') {
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          watchPartyService.sendCommand({
+            type: 'call-leave',
+            peerId: senderPeerId,
+          });
+        }
+      }
+    });
+
+    return () => unsubCmd();
+  }, [
+    getMediaElement,
+    broadcastCurrentState,
+    checkRateLimit,
+    getSavedDisplayName,
+    hostBroadcastChatMessage,
+    onToast,
+  ]);
+
+  // Guest: 8s heartbeat watchdog
+  useEffect(() => {
+    if (role !== 'guest' || status !== 'connected') {
+      setIsReconnecting(false);
+      return;
+    }
+
+    lastHeartbeatRef.current = Date.now();
+
+    const watchdog = setInterval(() => {
+      const elapsed = Date.now() - lastHeartbeatRef.current;
+      if (elapsed > 8000) {
+        setIsReconnecting(true);
+      } else {
+        setIsReconnecting(false);
+      }
+    }, 1000);
+
+    return () => clearInterval(watchdog);
+  }, [role, status]);
+
+  // Actions
+  const createRoom = async (): Promise<string> => {
+    audioEngine.resume();
+    const code = await watchPartyService.createRoom();
+    setRole('host');
+    roleRef.current = 'host';
+    setRoomCode(code);
+    setStatus('waiting');
+    setMessages([]);
+    messagesRef.current = [];
+    setUnreadCount(0);
+    participantsRef.current.clear();
+    const myName = getSavedDisplayName() || 'Host';
+    watchPartyService.setHostDisplayName(myName);
+    callManagerRef.current?.setPeer(watchPartyService.getPeer(), watchPartyService.getMyPeerId(), myName);
+    onToast?.('Room created');
+
+    // Check 6: Diagnostic logs for video state when room starts
+    const el = getMediaElement() as HTMLVideoElement | null;
+    if (el) {
+      console.log('[OmniPlay Host Room Start Diagnostics]', {
+        src: el.src,
+        srcObject: el.srcObject,
+        readyState: el.readyState,
+        videoWidth: el.videoWidth,
+        muted: el.muted,
+        paused: el.paused,
+      });
+    }
+
+    setTimeout(() => {
+      updateCapturedStream();
+    }, 300);
+    return code;
+  };
+
+  const joinRoom = async (code: string, displayName?: string): Promise<void> => {
+    const chosenName = sanitizeChatName(displayName || getSavedDisplayName(), 'Guest');
+    await watchPartyService.joinRoom(code, chosenName);
+    setRole('guest');
+    roleRef.current = 'guest';
+    setRoomCode(code.toUpperCase());
+    setStatus('connected');
+    setMessages([]);
+    messagesRef.current = [];
+    setUnreadCount(0);
+    callManagerRef.current?.setPeer(watchPartyService.getPeer(), watchPartyService.getMyPeerId(), chosenName);
+  };
+
+  const leaveRoom = () => {
+    callManagerRef.current?.cleanup();
+    setInCall(false);
+    setLocalStream(null);
+    setRemoteStreams(new Map());
+    setHostStutterWarning(false);
+    setVolumeDuckingMultiplier(1.0);
+
+    watchPartyService.leave();
+    setRole(null);
+    roleRef.current = null;
+    setRoomCode(null);
+    setIncomingStream(null);
+    setStatus('idle');
+    setErrorMessage(null);
+    setViewerCount(0);
+    setIsReconnecting(false);
+    setMessages([]);
+    messagesRef.current = [];
+    setUnreadCount(0);
+    setIsChatOpen(false);
+    setChatError(null);
+    participantsRef.current.clear();
+  };
+
+  const sendGuestControl = (action: 'play' | 'pause' | 'seek' | 'rate', time?: number, rate?: number) => {
+    // Send command over data channel to host
+    watchPartyService.sendCommand({
+      type: 'control',
+      action,
+      time,
+      rate,
+    });
+
+    // Optimistically update guest hostState for immediate feedback
+    setHostState((prev) => {
+      if (action === 'play') return { ...prev, isPlaying: true };
+      if (action === 'pause') return { ...prev, isPlaying: false };
+      if (action === 'seek' && typeof time === 'number') return { ...prev, currentTime: time };
+      if (action === 'rate' && typeof rate === 'number') return { ...prev, playbackRate: rate };
+      return prev;
+    });
+  };
+
+  // Send chat message
+  const sendChat = useCallback(
+    (text: string) => {
+      const clean = sanitizeChatText(text);
+      if (!clean) return;
+
+      const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+      if (isHost) {
+        if (!checkRateLimit('host')) {
+          setChatError('Slow down');
+          setTimeout(() => setChatError((prev) => (prev === 'Slow down' ? null : prev)), 2500);
+          return;
+        }
+
+        const hostName = sanitizeChatName(getSavedDisplayName(), 'Host');
+        const userMsg: ChatMessage = {
+          id: crypto.randomUUID(),
+          from: hostName,
+          fromId: 'host',
+          text: clean,
+          ts: Date.now(),
+          kind: 'user',
+        };
+        hostBroadcastChatMessage(userMsg);
+      } else {
+        watchPartyService.sendCommand({
+          type: 'chat',
+          text: clean,
+        });
+      }
+    },
+    [checkRateLimit, getSavedDisplayName, hostBroadcastChatMessage]
+  );
+
+  const setChatOpen = useCallback((open: boolean) => {
+    setIsChatOpen(open);
+    if (open) {
+      setUnreadCount(0);
+    }
+  }, []);
+
+  const clearUnread = useCallback(() => {
+    setUnreadCount(0);
+  }, []);
+
+  const handleToggleSound = useCallback((enabled: boolean) => {
+    setSoundEnabled(enabled);
+    try {
+      localStorage.setItem('omniplay-chat-sound', String(enabled));
+    } catch {}
+  }, []);
+
+  const rename = useCallback(
+    (newName: string) => {
+      const sanitized = sanitizeChatName(newName);
+      try {
+        localStorage.setItem('omniplay-chat-name', sanitized);
+      } catch {}
+
+      const isHost = roleRef.current === 'host' || watchPartyService.getRole() === 'host';
+      if (isHost) {
+        const oldName = sanitizeChatName(getSavedDisplayName(), 'Host');
+        if (oldName !== sanitized) {
+          watchPartyService.setHostDisplayName(sanitized);
+          const sysMsg: ChatMessage = {
+            id: crypto.randomUUID(),
+            from: 'System',
+            fromId: 'system',
+            text: `${oldName} is now ${sanitized}`,
+            ts: Date.now(),
+            kind: 'system',
+          };
+          hostBroadcastChatMessage(sysMsg);
+        }
+      } else {
+        watchPartyService.sendCommand({
+          type: 'rename',
+          name: sanitized,
+        });
+      }
+    },
+    [getSavedDisplayName, hostBroadcastChatMessage]
+  );
+
+  // Video Call Controls
+  const startCall = useCallback(async () => {
+    if (!callManagerRef.current) return;
+    const myName = getSavedDisplayName() || (roleRef.current === 'host' ? 'Host' : 'Guest');
+    callManagerRef.current.setPeer(
+      watchPartyService.getPeer(),
+      watchPartyService.getMyPeerId(),
+      myName
+    );
+    await callManagerRef.current.startCall();
+    watchPartyService.sendCommand({ type: 'call-join' });
+  }, [getSavedDisplayName]);
+
+  const endCall = useCallback(() => {
+    if (!callManagerRef.current) return;
+    watchPartyService.sendCommand({ type: 'call-leave' });
+    callManagerRef.current.endCall();
+  }, []);
+
+  const toggleCam = useCallback(() => {
+    callManagerRef.current?.toggleCam();
+  }, []);
+
+  const toggleMic = useCallback(() => {
+    callManagerRef.current?.toggleMic();
+  }, []);
+
+  const selectDevice = useCallback(async (kind: 'audioinput' | 'videoinput', id: string) => {
+    await callManagerRef.current?.selectDevice(kind, id);
+  }, []);
+
+  const setCallQuality = useCallback((q: CallQuality) => {
+    setCallQualityState(q);
+    callManagerRef.current?.setQuality(q);
+  }, []);
+
+  const setDuckingEnabled = useCallback((enabled: boolean) => {
+    setIsDuckingEnabledState(enabled);
+    callManagerRef.current?.setDuckingEnabled(enabled);
+  }, []);
+
+  const toggleBandwidthSaver = useCallback(() => {
+    callManagerRef.current?.toggleBandwidthSaver();
+    setBandwidthSaver(callManagerRef.current?.getBandwidthSaver() ?? false);
+  }, []);
+
+  const turnOffCamerasForBandwidth = useCallback(() => {
+    callManagerRef.current?.turnOffCamerasForBandwidth();
+    setBandwidthSaver(true);
+    setHostStutterWarning(false);
+  }, []);
+
+  const dismissStutterWarning = useCallback(() => {
+    setHostStutterWarning(false);
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      callManagerRef.current?.cleanup();
+    };
+  }, []);
+
+  return {
+    role,
+    roomCode,
+    status,
+    errorMessage,
+    viewerCount,
+    incomingStream,
+    isReconnecting,
+    hostState,
+    guestSubtitleTrack,
+    allowGuestControl,
+    setAllowGuestControl,
+    createRoom,
+    joinRoom,
+    leaveRoom,
+    sendGuestControl,
+    broadcastCurrentState,
+    updateCapturedStream,
+    // Chat additions
+    messages,
+    sendChat,
+    unreadCount,
+    isChatOpen,
+    setChatOpen,
+    clearUnread,
+    chatError,
+    soundEnabled,
+    setSoundEnabled: handleToggleSound,
+    rename,
+    myId: watchPartyService.getMyPeerId() || (role === 'host' ? 'host' : 'guest'),
+    // Video Call additions
+    localStream,
+    remoteStreams,
+    camEnabled,
+    micEnabled,
+    toggleCam,
+    toggleMic,
+    startCall,
+    endCall,
+    inCall,
+    devices: callDevices,
+    selectDevice,
+    callError,
+    callQuality,
+    setCallQuality,
+    isDuckingEnabled,
+    setDuckingEnabled,
+    bandwidthSaver,
+    toggleBandwidthSaver,
+    hostStutterWarning,
+    dismissStutterWarning,
+    turnOffCamerasForBandwidth,
+    volumeDuckingMultiplier,
+  };
+}

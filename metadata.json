@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix OmniPlay",
+  "description": "Instantly play any video or audio file from your local storage with a sleek, dark mode interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
