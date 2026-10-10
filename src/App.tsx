@@ -986,18 +986,36 @@ export default function App() {
 
       {/* Real-time Watch Together Room Chat Drawer */}
       {watchRole !== null && (
-        <ChatDrawer
-          isOpen={watchIsChatOpen}
-          onClose={() => setWatchChatOpen(false)}
-          messages={watchMessages}
-          onSendMessage={watchSendChat}
-          myId={watchMyId}
-          participantCount={watchViewerCount + 1}
-          chatError={watchChatError}
-          isConnected={watchStatus === 'connected' || watchStatus === 'waiting'}
-          soundEnabled={watchSoundEnabled}
-          onToggleSound={setWatchSoundEnabled}
-        />
+        isFullscreen && document.fullscreenElement
+          ? createPortal(
+              <ChatDrawer
+                isOpen={watchIsChatOpen}
+                onClose={() => setWatchChatOpen(false)}
+                messages={watchMessages}
+                onSendMessage={watchSendChat}
+                myId={watchMyId}
+                participantCount={watchViewerCount + 1}
+                chatError={watchChatError}
+                isConnected={watchStatus === 'connected' || watchStatus === 'waiting'}
+                soundEnabled={watchSoundEnabled}
+                onToggleSound={setWatchSoundEnabled}
+              />,
+              document.fullscreenElement
+            )
+          : (
+              <ChatDrawer
+                isOpen={watchIsChatOpen}
+                onClose={() => setWatchChatOpen(false)}
+                messages={watchMessages}
+                onSendMessage={watchSendChat}
+                myId={watchMyId}
+                participantCount={watchViewerCount + 1}
+                chatError={watchChatError}
+                isConnected={watchStatus === 'connected' || watchStatus === 'waiting'}
+                soundEnabled={watchSoundEnabled}
+                onToggleSound={setWatchSoundEnabled}
+              />
+            )
       )}
 
       {/* Fullscreen Chat Overlay for Live Transient Messages */}
