@@ -450,7 +450,7 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-zinc-950 text-zinc-100 overflow-hidden font-sans">
+    <div className="grid grid-rows-[auto_1fr] h-screen w-screen bg-zinc-950 text-zinc-100 overflow-hidden font-sans">
       {/* Top Application Header */}
       <header
         className="h-14 border-b border-zinc-800/80 bg-zinc-900/95 px-3 sm:px-4 flex items-center justify-between z-30 shrink-0 backdrop-blur-md max-w-full box-border overflow-x-hidden relative"
@@ -776,7 +776,7 @@ export default function App() {
         )}
 
       {/* Main Player Display Area */}
-      <main className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
+      <main className="min-h-0 relative flex items-center justify-center bg-black overflow-hidden">
         {watchRole === 'guest' ? (
           <GuestPlayer
             roomCode={watchRoomCode || ''}
