@@ -195,23 +195,16 @@ export const CallStrip: React.FC<CallStripProps> = ({
   const participantCount = remoteStreams.size + 1;
   const selfInitial = myName.charAt(0).toUpperCase();
 
-  // If Hidden: Show compact floating button to reopen
+  // If Hidden: Show draggable compact floating badge to reopen
   if (isHidden) {
     return (
-      <div className="absolute top-16 right-4 z-[100] animate-in fade-in zoom-in-95 duration-150">
-        <button
-          onClick={() => {
-            setIsHidden(false);
-            setIsMinimized(false);
-          }}
-          className="flex items-center gap-2 px-3 py-1.5 bg-zinc-950/95 hover:bg-zinc-900 border border-emerald-500/50 backdrop-blur-md rounded-2xl shadow-2xl text-xs text-white transition-all group"
-          title="Click to show video call"
-        >
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <Video className="w-3.5 h-3.5 text-emerald-400 group-hover:scale-110 transition-transform" />
-          <span className="font-semibold text-emerald-200">Show Call ({participantCount})</span>
-        </button>
-      </div>
+      <DraggableCallBadge
+        participantCount={participantCount}
+        onShowCall={() => {
+          setIsHidden(false);
+          setIsMinimized(false);
+        }}
+      />
     );
   }
 
@@ -598,3 +591,226 @@ export const CallStrip: React.FC<CallStripProps> = ({
     </div>
   );
 };
+
+const DraggableCallBadge: React.FC<{
+  participantCount: number;
+  onShowCall: () => void;
+}> = ({ participantCount, onShowCall }) => {
+  const badgeRef = useRef<HTMLButtonElement>(null);
+  const dragRef = useRef({
+    isDragging: false,
+    startX: 0,
+    startY: 0,
+    initialX: 0,
+    initialY: 0,
+    hasMoved: false,
+  });
+
+  const [isDraggingState, setIsDraggingState] = useState(false);
+
+  const updatePositionStyle = (x: number, y: number, transition = false) => {
+    if (!badgeRef.current) return;
+    badgeRef.current.style.transition = transition ? 'transform 200ms ease-out' : 'none';
+    badgeRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  };
+
+  useEffect(() => {
+    const badge = badgeRef.current;
+    if (!badge) return;
+    const container = badge.offsetParent as HTMLElement || badge.parentElement;
+    if (!container) return;
+
+    const containerWidth = container.clientWidth;
+    const containerHeight = container.clientHeight;
+    const badgeWidth = badge.offsetWidth || 120;
+    const badgeHeight = badge.offsetHeight || 36;
+
+    let initialX = containerWidth - badgeWidth - 16;
+    let initialY = 64;
+
+    try {
+      const saved = localStorage.getItem('omniplay.callBadgePos');
+      if (saved) {
+        const { xPct, yPct } = JSON.parse(saved);
+        if (typeof xPct === 'number' && typeof yPct === 'number') {
+          initialX = xPct * (containerWidth - badgeWidth);
+          initialY = yPct * (containerHeight - badgeHeight - 98);
+        }
+      }
+    } catch {}
+
+    initialX = Math.max(8, Math.min(initialX, containerWidth - badgeWidth - 8));
+    initialY = Math.max(8, Math.min(initialY, containerHeight - badgeHeight - 98));
+
+    updatePositionStyle(initialX, initialY, false);
+    (badge as any).__currentX = initialX;
+    (badge as any).__currentY = initialY;
+
+    const handleResize = () => {
+      if (!badge) return;
+      const c = badge.offsetParent as HTMLElement || badge.parentElement;
+      if (!c) return;
+      const cw = c.clientWidth;
+      const ch = c.clientHeight;
+      const bw = badge.offsetWidth || 120;
+      const bh = badge.offsetHeight || 36;
+      let x = (badge as any).__currentX ?? (cw - bw - 16);
+      let y = (badge as any).__currentY ?? 64;
+      x = Math.max(8, Math.min(x, cw - bw - 8));
+      y = Math.max(8, Math.min(y, ch - bh - 98));
+      updatePositionStyle(x, y, false);
+      (badge as any).__currentX = x;
+      (badge as any).__currentY = y;
+    };
+
+    window.addEventListener('resize', handleResize);
+    document.addEventListener('fullscreenchange', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      document.removeEventListener('fullscreenchange', handleResize);
+    };
+  }, []);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    const badge = badgeRef.current;
+    if (!badge) return;
+    try {
+      badge.setPointerCapture(e.pointerId);
+    } catch {}
+
+    const container = badge.offsetParent as HTMLElement || badge.parentElement;
+    if (!container) return;
+
+    const rect = badge.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+
+    dragRef.current = {
+      isDragging: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      initialX: rect.left - containerRect.left,
+      initialY: rect.top - containerRect.top,
+      hasMoved: false,
+    };
+    setIsDraggingState(true);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    if (!dragRef.current.isDragging || !badgeRef.current) return;
+
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist > 6) {
+      dragRef.current.hasMoved = true;
+    }
+
+    const newX = dragRef.current.initialX + dx;
+    const newY = dragRef.current.initialY + dy;
+
+    const badge = badgeRef.current;
+    const container = badge.offsetParent as HTMLElement || badge.parentElement;
+    if (!container) return;
+
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    const bw = badge.offsetWidth;
+    const bh = badge.offsetHeight;
+
+    const clampedX = Math.max(8, Math.min(newX, cw - bw - 8));
+    const clampedY = Math.max(8, Math.min(newY, ch - bh - 98));
+
+    (badge as any).__currentX = clampedX;
+    (badge as any).__currentY = clampedY;
+
+    updatePositionStyle(clampedX, clampedY, false);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    const badge = badgeRef.current;
+    if (!badge) return;
+    try {
+      badge.releasePointerCapture(e.pointerId);
+    } catch {}
+
+    if (!dragRef.current.isDragging) return;
+    dragRef.current.isDragging = false;
+    setIsDraggingState(false);
+
+    if (!dragRef.current.hasMoved) {
+      onShowCall();
+      return;
+    }
+
+    const container = badge.offsetParent as HTMLElement || badge.parentElement;
+    if (!container) return;
+
+    const cw = container.clientWidth;
+    const ch = container.clientHeight;
+    const bw = badge.offsetWidth;
+    const bh = badge.offsetHeight;
+
+    let curX = (badge as any).__currentX ?? 0;
+    let curY = (badge as any).__currentY ?? 0;
+
+    const snapLeft = 8;
+    const snapRight = cw - bw - 8;
+    const targetX = curX + bw / 2 < cw / 2 ? snapLeft : snapRight;
+    const clampedY = Math.max(8, Math.min(curY, ch - bh - 98));
+
+    (badge as any).__currentX = targetX;
+    (badge as any).__currentY = clampedY;
+
+    updatePositionStyle(targetX, clampedY, true);
+
+    try {
+      const xPct = targetX / Math.max(1, cw - bw);
+      const yPct = clampedY / Math.max(1, ch - bh - 98);
+      localStorage.setItem('omniplay.callBadgePos', JSON.stringify({ xPct, yPct }));
+    } catch {}
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onShowCall();
+    }
+  };
+
+  return (
+    <div className="absolute top-0 left-0 z-[100] pointer-events-none">
+      <button
+        ref={badgeRef}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (!dragRef.current.hasMoved) {
+            onShowCall();
+          }
+        }}
+        onKeyDown={handleKeyDown}
+        className={`pointer-events-auto flex items-center gap-1.5 px-2.5 py-1 bg-zinc-950/85 hover:bg-zinc-900 border border-emerald-500/50 backdrop-blur-md rounded-full sm:rounded-2xl shadow-xl text-xs text-white transition-opacity duration-150 select-none touch-none ${
+          isDraggingState ? 'opacity-100 ring-2 ring-emerald-400/50 scale-105' : 'opacity-85 hover:opacity-100'
+        }`}
+        style={{ touchAction: 'none', height: '28px' }}
+        aria-label={`Show call (${participantCount} participants)`}
+        title="Drag to move, click to show call"
+      >
+        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+        <Video className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+        <span className="font-semibold text-emerald-200 text-xs sm:inline flex items-center">
+          <span className="hidden sm:inline">Show Call&nbsp;</span>({participantCount})
+        </span>
+      </button>
+    </div>
+  );
+};
+
