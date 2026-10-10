@@ -776,7 +776,7 @@ export default function App() {
         )}
 
       {/* Main Player Display Area */}
-      <main className="flex-1 relative flex items-center justify-center bg-black overflow-hidden">
+      <main className={`flex-1 relative flex items-center justify-center bg-black ${playlist.length === 0 || !currentMedia || watchRole === 'guest' ? 'overflow-y-auto' : 'overflow-hidden'}`}>
         {watchRole === 'guest' ? (
           <GuestPlayer
             roomCode={watchRoomCode || ''}

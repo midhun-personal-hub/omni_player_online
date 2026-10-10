@@ -53,7 +53,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({ onAddFiles, onLoadMediaI
     <div
       onDragOver={handleDragOver}
       onDrop={handleDrop}
-      className="flex-1 flex flex-col items-center justify-center p-6 bg-zinc-950 text-white min-h-[600px] select-none"
+      className="flex-1 flex flex-col items-center justify-center p-6 bg-zinc-950 text-white min-h-full py-8 select-none"
     >
       <div className="w-full max-w-2xl text-center space-y-6">
         {/* Brand Icon & Headline */}
