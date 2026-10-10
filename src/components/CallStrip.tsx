@@ -800,13 +800,14 @@ const DraggableCallBadge: React.FC<{
           isDraggingState ? 'opacity-100 ring-2 ring-emerald-400/50 scale-105' : 'opacity-85 hover:opacity-100'
         }`}
         style={{ touchAction: 'none', height: '28px' }}
-        aria-label={`(${participantCount} participants)`}
+        aria-label={`Show call (${participantCount} participants)`}
         title="Drag to move, click to show call"
       >
         <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
         <Video className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
         <span className="font-semibold text-emerald-200 text-xs sm:inline flex items-center">
-          <span className="hidden sm:inline">Show Call&nbsp;</span>({participantCount})
+         {/* <span className="hidden sm:inline">Show Call&nbsp;</span>({participantCount}) */}
+         <span className="hidden sm:inline">&nbsp;</span>({participantCount})
         </span>
       </button>
     </div>
