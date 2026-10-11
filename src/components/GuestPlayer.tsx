@@ -17,10 +17,24 @@ import {
   WifiOff,
   MessageSquare,
   Video,
+  X,
 } from 'lucide-react';
 import { SubtitleTrack } from '../types/media';
 import { formatTime } from '../utils/formatters';
 import { RoomControls } from './RoomControls';
+import { TransferProgress, fileTransferManager, debugMetrics } from '../utils/fileTransfer';
+import {
+  evaluateProgressiveReadiness,
+  initMovieServiceWorker,
+  getMovieStreamUrl,
+  testProgressiveDecodability,
+  ProgressiveStatus,
+} from '../utils/progressivePlayback';
+import {
+  verifyGuestLocalFileMatch,
+  saveLastPlaybackPosition,
+  getLastPlaybackPosition,
+} from '../utils/fileIdentity';
 
 interface GuestPlayerProps {
   roomCode: string;
@@ -47,6 +61,13 @@ interface GuestPlayerProps {
   onStartCall?: () => void;
   duckingMultiplier?: number;
   callStrip?: React.ReactNode;
+  isLocalPlayback?: boolean;
+  localVideoUrl?: string | null;
+  transferProgress?: TransferProgress | null;
+  onCancelDownload?: () => void;
+  onRevertToLiveStream?: () => void;
+  onActivateProgressivePlayback?: (streamUrl: string) => void;
+  onSendBuffering?: (isBuffering: boolean) => void;
 }
 
 export const GuestPlayer: React.FC<GuestPlayerProps> = ({
@@ -66,6 +87,13 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
   onStartCall,
   duckingMultiplier = 1.0,
   callStrip,
+  isLocalPlayback = false,
+  localVideoUrl = null,
+  transferProgress = null,
+  onCancelDownload,
+  onRevertToLiveStream,
+  onActivateProgressivePlayback,
+  onSendBuffering,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -80,6 +108,154 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
   const [autoplayBlocked, setAutoplayBlocked] = useState<boolean>(false);
   const hideControlsTimerRef = useRef<number | null>(null);
   const [isShortHeight, setIsShortHeight] = useState<boolean>(window.innerHeight < 420);
+
+  // Progressive playback state (Phase 2)
+  const [progressiveStatus, setProgressiveStatus] = useState<ProgressiveStatus | null>(null);
+  const [autoStartEnabled, setAutoStartEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('omniplay-auto-start-watching') !== 'false';
+    } catch {
+      return true;
+    }
+  });
+  const [swSupported, setSwSupported] = useState<boolean>(true);
+  const isTestingDecodabilityRef = useRef<boolean>(false);
+
+  // Initialize service worker on guest mount
+  useEffect(() => {
+    initMovieServiceWorker().then((ready) => {
+      setSwSupported(ready);
+    });
+  }, []);
+
+  // Poll progressive playback readiness during transfer
+  useEffect(() => {
+    if (isLocalPlayback || !transferProgress || transferProgress.status !== 'transferring') {
+      return;
+    }
+
+    const receiver = fileTransferManager.getGuestReceiver();
+    if (!receiver || !receiver.manifest) return;
+
+    const manifest = receiver.manifest;
+    const receivedPieces = receiver.receivedPieces;
+    const speed = transferProgress.speedBytesPerSec || 0;
+    const history = receiver.speedHistory || [];
+
+    const status = evaluateProgressiveReadiness(
+      manifest,
+      receivedPieces,
+      speed,
+      history,
+      hostState.currentTime
+    );
+
+    setProgressiveStatus(status);
+
+    // Update debug metrics
+    debugMetrics.contiguousSecondsAhead = status.contiguousSeconds;
+    debugMetrics.downloadSpeedVsAvgBitrate = `${status.measuredSpeedMbps} / ${status.avgBitrateMbps} Mbps`;
+
+    // If auto-start is true, SW is ready, and canStart is true, test decodability and launch
+    if (status.canStart && autoStartEnabled && swSupported && !isTestingDecodabilityRef.current) {
+      isTestingDecodabilityRef.current = true;
+      const streamUrl = getMovieStreamUrl(manifest.fingerprint, manifest.type, manifest.name);
+
+      testProgressiveDecodability(streamUrl).then((decodable) => {
+        if (decodable) {
+          onActivateProgressivePlayback?.(streamUrl);
+        } else {
+          console.warn('[Progressive] Device cannot decode file directly, staying on live stream');
+          debugMetrics.fallbacksCount++;
+        }
+      });
+    }
+  }, [
+    isLocalPlayback,
+    transferProgress,
+    hostState.currentTime,
+    autoStartEnabled,
+    swSupported,
+    onActivateProgressivePlayback,
+  ]);
+
+  const handleStartWatchingProgressive = async () => {
+    const receiver = fileTransferManager.getGuestReceiver();
+    if (!receiver || !receiver.manifest) return;
+    const manifest = receiver.manifest;
+    const streamUrl = getMovieStreamUrl(manifest.fingerprint, manifest.type, manifest.name);
+
+    const decodable = await testProgressiveDecodability(streamUrl);
+    if (decodable) {
+      onActivateProgressivePlayback?.(streamUrl);
+    } else {
+      console.warn('[Progressive] Device cannot decode file directly, staying on live stream');
+      debugMetrics.fallbacksCount++;
+    }
+  };
+
+  // Phase 3A: "I already have this file" state
+  const [showOwnCopyPrompt, setShowOwnCopyPrompt] = useState<boolean>(false);
+  const [isUsingOwnCopy, setIsUsingOwnCopy] = useState<boolean>(false);
+  const ownFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Phase 3D: Resume position state
+  const [resumePromptTime, setResumePromptTime] = useState<number | null>(null);
+
+  // Show "Download from host" vs "Use my own copy" prompt when manifest arrives
+  useEffect(() => {
+    if (transferProgress && transferProgress.status === 'transferring' && !isLocalPlayback && !isUsingOwnCopy) {
+      const receiver = fileTransferManager.getGuestReceiver();
+      if (receiver && receiver.manifest) {
+        setShowOwnCopyPrompt(true);
+
+        // Check if last playback position exists
+        const lastPos = getLastPlaybackPosition(receiver.manifest.fingerprint);
+        if (lastPos && Math.abs(hostState.currentTime - lastPos) > 15) {
+          setResumePromptTime(lastPos);
+        }
+      }
+    }
+  }, [transferProgress, isLocalPlayback, isUsingOwnCopy, hostState.currentTime]);
+
+  // Track and save current playback position
+  useEffect(() => {
+    if (isLocalPlayback && hostState.currentTime > 10) {
+      const receiver = fileTransferManager.getGuestReceiver();
+      if (receiver && receiver.manifest) {
+        saveLastPlaybackPosition(receiver.manifest.fingerprint, hostState.currentTime);
+      }
+    }
+  }, [isLocalPlayback, hostState.currentTime]);
+
+  const handleSelectOwnCopy = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const receiver = fileTransferManager.getGuestReceiver();
+    if (!receiver || !receiver.manifest) return;
+
+    const check = await verifyGuestLocalFileMatch(
+      file,
+      receiver.manifest.size,
+      receiver.manifest.fingerprint
+    );
+
+    if (check.matches) {
+      // Use own copy directly
+      setIsUsingOwnCopy(true);
+      setShowOwnCopyPrompt(false);
+      const objUrl = URL.createObjectURL(file);
+      fileTransferManager.activateProgressiveMode(objUrl);
+      onActivateProgressivePlayback?.(objUrl);
+    } else {
+      alert("This isn't the same file. You can download it directly from the host.");
+    }
+
+    if (ownFileInputRef.current) {
+      ownFileInputRef.current.value = '';
+    }
+  };
 
   useEffect(() => {
     const handleResize = () => setIsShortHeight(window.innerHeight < 420);
@@ -101,21 +277,148 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
     ? incomingStream.getVideoTracks().length > 0 && !hostState.isAudio
     : !hostState.isAudio;
 
-  // Bind incoming stream to <video> element
+  // Bind video element: Local playback or live stream
   useEffect(() => {
-    if (videoRef.current && incomingStream) {
-      videoRef.current.srcObject = incomingStream;
-      videoRef.current
-        .play()
-        .then(() => {
-          setAutoplayBlocked(false);
-        })
-        .catch((err) => {
+    if (!videoRef.current) return;
+
+    if (isLocalPlayback && localVideoUrl) {
+      // Disable live stream tracks to save bandwidth
+      if (incomingStream) {
+        incomingStream.getTracks().forEach((t) => {
+          t.enabled = false;
+        });
+      }
+      videoRef.current.srcObject = null;
+      videoRef.current.src = localVideoUrl;
+      videoRef.current.currentTime = hostState.currentTime;
+      videoRef.current.playbackRate = hostState.playbackRate;
+      if (hostState.isPlaying) {
+        videoRef.current.play().catch((err) => {
           console.warn('Autoplay prevented by browser:', err);
           setAutoplayBlocked(true);
         });
+      } else {
+        videoRef.current.pause();
+      }
+    } else {
+      // Re-enable live stream tracks
+      if (incomingStream) {
+        incomingStream.getTracks().forEach((t) => {
+          t.enabled = true;
+        });
+      }
+      if (videoRef.current.src) {
+        videoRef.current.src = '';
+      }
+      if (incomingStream) {
+        videoRef.current.srcObject = incomingStream;
+        videoRef.current
+          .play()
+          .then(() => {
+            setAutoplayBlocked(false);
+          })
+          .catch((err) => {
+            console.warn('Autoplay prevented by browser:', err);
+            setAutoplayBlocked(true);
+          });
+      }
     }
-  }, [incomingStream]);
+
+    return () => {
+      if (incomingStream) {
+        incomingStream.getTracks().forEach((t) => {
+          t.enabled = true;
+        });
+      }
+    };
+  }, [isLocalPlayback, localVideoUrl, incomingStream]);
+
+  // Timestamp drift correction in local mode
+  useEffect(() => {
+    if (!isLocalPlayback || !videoRef.current) return;
+    const v = videoRef.current;
+
+    if (hostState.isPlaying && v.paused) {
+      v.play().catch(console.warn);
+    } else if (!hostState.isPlaying && !v.paused) {
+      v.pause();
+    }
+
+    const now = Date.now();
+    const sentAt = (hostState as any).sentAt || now;
+    const elapsed = Math.max(0, (now - sentAt) / 1000);
+    const expected = hostState.isPlaying
+      ? hostState.currentTime + elapsed * hostState.playbackRate
+      : hostState.currentTime;
+    const drift = expected - v.currentTime;
+
+    // Drift < 0.3s: do nothing
+    // Drift 0.3s to 1.5s: adjust playbackRate to 0.95 or 1.05
+    // Drift > 1.5s: seek
+    if (Math.abs(drift) < 0.3) {
+      v.playbackRate = hostState.playbackRate;
+    } else if (drift >= 0.3 && drift <= 1.5) {
+      v.playbackRate = Number((hostState.playbackRate * 1.05).toFixed(2));
+    } else if (drift <= -0.3 && drift >= -1.5) {
+      v.playbackRate = Number((hostState.playbackRate * 0.95).toFixed(2));
+    } else if (Math.abs(drift) > 1.5) {
+      v.currentTime = expected;
+      v.playbackRate = hostState.playbackRate;
+    }
+  }, [
+    isLocalPlayback,
+    hostState.isPlaying,
+    hostState.currentTime,
+    hostState.playbackRate,
+    (hostState as any).sentAt,
+  ]);
+
+  // Buffering listener: fires 'buffering' if waiting for > 2s, and stall timeout (revert to live stream if stalled > 20s)
+  useEffect(() => {
+    if (!isLocalPlayback || !videoRef.current) return;
+    const v = videoRef.current;
+    let waitTimer: number | null = null;
+    let stallTimer: number | null = null;
+
+    const handleWaiting = () => {
+      if (onSendBuffering) {
+        waitTimer = window.setTimeout(() => {
+          onSendBuffering(true);
+        }, 2000);
+      }
+
+      // 20s stall fallback to live stream
+      stallTimer = window.setTimeout(() => {
+        console.warn('[Progressive] Stalled for > 20s in local progressive playback, reverting to live stream');
+        debugMetrics.fallbacksCount++;
+        onRevertToLiveStream?.();
+      }, 20000);
+    };
+
+    const handlePlaying = () => {
+      if (waitTimer) {
+        clearTimeout(waitTimer);
+        waitTimer = null;
+      }
+      if (stallTimer) {
+        clearTimeout(stallTimer);
+        stallTimer = null;
+      }
+      onSendBuffering?.(false);
+    };
+
+    v.addEventListener('waiting', handleWaiting);
+    v.addEventListener('playing', handlePlaying);
+    v.addEventListener('canplay', handlePlaying);
+
+    return () => {
+      if (waitTimer) clearTimeout(waitTimer);
+      if (stallTimer) clearTimeout(stallTimer);
+      v.removeEventListener('waiting', handleWaiting);
+      v.removeEventListener('playing', handlePlaying);
+      v.removeEventListener('canplay', handlePlaying);
+    };
+  }, [isLocalPlayback, onSendBuffering, onRevertToLiveStream]);
 
   // Fullscreen listener
   useEffect(() => {
@@ -321,6 +624,170 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
       onMouseMove={handleMouseMove}
       className="relative w-full h-full bg-black flex items-center justify-center select-none overflow-hidden"
     >
+      {/* Download Progress Chip for Guest */}
+      {transferProgress && transferProgress.status === 'transferring' && (
+        <div className="absolute top-16 left-4 z-30 flex items-center gap-2 px-3 py-1.5 rounded-full bg-zinc-900/90 border border-sky-500/40 text-[11px] text-zinc-200 shadow-xl backdrop-blur-md animate-in fade-in">
+          <Loader2 className="w-3.5 h-3.5 text-sky-400 animate-spin" />
+          <span>
+            Downloading {transferProgress.percentage}% •{' '}
+            {((transferProgress.speedBytesPerSec || 0) / (1024 * 1024)).toFixed(1)} MB/s
+            {transferProgress.etaSeconds > 0
+              ? ` • ~${Math.ceil(transferProgress.etaSeconds / 60)} min left`
+              : ''}
+          </span>
+          {onCancelDownload && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onCancelDownload();
+              }}
+              className="ml-1 p-0.5 rounded-full hover:bg-zinc-800 text-zinc-400 hover:text-white transition-colors"
+              title="Cancel download"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+
+          {/* Phase 2: Progressive Watching Actions */}
+          {!isLocalPlayback && progressiveStatus && (
+            <div className="flex items-center gap-1.5 pl-1 border-l border-zinc-700/60">
+              {progressiveStatus.canStart ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleStartWatchingProgressive();
+                  }}
+                  className="px-2 py-0.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold text-[10px] transition-colors shadow-xs"
+                >
+                  Start watching
+                </button>
+              ) : (
+                <span className="text-[10px] text-sky-300 font-medium">
+                  Ready in ~{progressiveStatus.readyInMinutes} min
+                </span>
+              )}
+
+              {/* Start now anyway (may buffer) if head is stored */}
+              {!progressiveStatus.canStart && progressiveStatus.hasHeadAndTail && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleStartWatchingProgressive();
+                  }}
+                  className="px-1.5 py-0.5 rounded text-[10px] text-zinc-400 hover:text-amber-300 transition-colors"
+                  title="Start now anyway (may buffer)"
+                >
+                  Start now
+                </button>
+              )}
+
+              {/* Auto-start checkbox */}
+              <label
+                className="flex items-center gap-1 text-[10px] text-zinc-400 cursor-pointer ml-1"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  checked={autoStartEnabled}
+                  onChange={(e) => {
+                    setAutoStartEnabled(e.target.checked);
+                    try {
+                      localStorage.setItem('omniplay-auto-start-watching', String(e.target.checked));
+                    } catch {}
+                  }}
+                  className="rounded border-zinc-700 bg-zinc-950 text-sky-500 w-3 h-3 focus:ring-0"
+                />
+                <span className="hidden sm:inline">Auto-start</span>
+              </label>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Hidden File Input for "Use my own copy" */}
+      <input
+        ref={ownFileInputRef}
+        type="file"
+        accept="video/*,audio/*,.mkv,.mp4,.webm"
+        className="hidden"
+        onChange={handleSelectOwnCopy}
+      />
+
+      {/* Prompt: "Download from host" or "Use my own copy" */}
+      {showOwnCopyPrompt && !isLocalPlayback && !isUsingOwnCopy && (
+        <div className="absolute top-28 left-4 z-30 max-w-xs p-2.5 rounded-xl bg-zinc-900/95 border border-sky-500/40 text-xs shadow-2xl backdrop-blur-md space-y-2 animate-in fade-in">
+          <div className="text-[11px] font-medium text-zinc-200">
+            Playing this movie together. Do you have this file locally?
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => ownFileInputRef.current?.click()}
+              className="px-2 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-bold text-[10px] transition-colors"
+            >
+              Use my own copy
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowOwnCopyPrompt(false)}
+              className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] transition-colors"
+            >
+              Download from host
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Resume from mm:ss Prompt */}
+      {resumePromptTime !== null && !isLocalPlayback && (
+        <div className="absolute top-44 left-4 z-30 max-w-xs p-2.5 rounded-xl bg-zinc-900/95 border border-amber-500/40 text-xs shadow-2xl backdrop-blur-md flex items-center justify-between gap-2 animate-in fade-in">
+          <span className="text-[11px] text-amber-300">
+            Resume from {formatTime(resumePromptTime)}?
+          </span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                onSendControl('seek', resumePromptTime);
+                setResumePromptTime(null);
+              }}
+              className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-[10px]"
+            >
+              Resume
+            </button>
+            <button
+              type="button"
+              onClick={() => setResumePromptTime(null)}
+              className="p-1 rounded text-zinc-400 hover:text-white text-[10px]"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Mode Indicator Label: "Using your own copy" / "Playing from downloaded copy" / "Live stream" */}
+      <div className="absolute top-16 right-4 z-30 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-zinc-900/80 border border-zinc-700/60 text-[10px] font-medium text-zinc-300 shadow-md backdrop-blur-md">
+        <span
+          className={`w-2 h-2 rounded-full ${
+            isUsingOwnCopy
+              ? 'bg-purple-400'
+              : isLocalPlayback
+              ? 'bg-emerald-400 animate-pulse'
+              : 'bg-sky-400'
+          }`}
+        />
+        <span>
+          {isUsingOwnCopy
+            ? 'Using your own copy'
+            : isLocalPlayback
+            ? 'Playing from downloaded copy'
+            : 'Live stream'}
+        </span>
+      </div>
+
       {/* Clickable video viewport */}
       <div
         className="w-full h-full flex items-center justify-center cursor-pointer"
@@ -331,6 +798,12 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
           ref={videoRef}
           autoPlay
           playsInline
+          onError={() => {
+            if (isLocalPlayback) {
+              console.warn('Local video playback failed, reverting to live stream');
+              onRevertToLiveStream?.();
+            }
+          }}
           className={`w-full h-full object-contain ${hasVideoTrack ? 'block' : 'hidden'}`}
         />
       </div>
@@ -549,6 +1022,18 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
             }`}
             title={hostState.allowGuestControl ? 'Seek playback' : 'Playback locked to host'}
           >
+            {/* Downloaded Ranges Overlay (Phase 2) */}
+            {progressiveStatus?.downloadedRanges.map((range, idx) => (
+              <div
+                key={idx}
+                className="absolute top-0 bottom-0 bg-zinc-600/60 pointer-events-none"
+                style={{
+                  left: `${range.startPercent}%`,
+                  width: `${range.endPercent - range.startPercent}%`,
+                }}
+              />
+            ))}
+
             {/* Progress Fill */}
             <div
               className="absolute left-0 top-0 bottom-0 bg-sky-500 rounded-full"

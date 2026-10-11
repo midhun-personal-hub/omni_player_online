@@ -1,14 +1,24 @@
-# Implementation Plan - Fix DraggableCallBadge Dragging
+# Implementation Plan - OmniPlay Watch-Together Smoothness & Diagnostics
 
-## Problem
-The `DraggableCallBadge` dragging feature is not working properly because `badge.offsetParent` or `badge.parentElement` resolves to its immediate wrapper `div` (which has `absolute top-0 left-0 pointer-events-none`) rather than the actual player container (`VideoPlayer` or `GuestPlayer` container), leading to incorrect container dimensions and coordinate calculations.
-
-## Proposed Changes
-### `src/components/CallStrip.tsx`
-- Update container lookup in `DraggableCallBadge` to search for the parent player container using `.closest('.relative')` or traversing up to the video player container instead of `offsetParent`.
-- Ensure pointer move events calculate movement delta (`dx`, `dy`) and update `transform: translate3d(...)` relative to the player container correctly.
-- Add window and fullscreen event handlers correctly bounding the badge inside the player.
+## Files & Functions to Touch
+1. **`src/utils/watchParty.ts`**:
+   - `captureStream(30)` + `contentHint = "motion"`
+   - Sender parameters (`maintain-framerate`, `maxFramerate = 30`, dynamic `scaleResolutionDownBy`, presets: Smooth 720p ~2.5M, Balanced 720p ~3.5M, High 1080p ~6M)
+   - Codec preference: H264 first, then VP8, VP9 last
+   - Slideshow guard & adaptive step-down/step-up based on outbound FPS & stats
+   - Visibility change toast & WakeLock API (`navigator.wakeLock.request('screen')`)
+   - Guest jitter buffer target smoothing (`receiver.jitterBufferTarget = 500ms` up to 1500ms)
+   - Expose `window.__moviePc` when `?debug=1`
+2. **`src/utils/callManager.ts`**:
+   - Camera getUserMedia constraints (640x360, 24fps)
+   - Call sender parameters (`maxBitrate = 400_000`, `maxFramerate = 24`, `maintain-framerate`, `contentHint = "motion"`, mic 32kbps high priority)
+   - Bandwidth sharing (~400 kbps reduction on movie when call starts, restore when call ends)
+   - Fast first video / keyframe request
+3. **UI / Components (`src/App.tsx`, `src/components/VideoPlayer.tsx`, `GuestPlayer.tsx`, etc.)**:
+   - Host movie video element: keep in viewport with `opacity: 0.01` (never display:none / hidden)
+   - Quality selector (Smooth / Balanced / High)
+   - Debug overlay (hidden by default, toggled via `?debug=1` or `Ctrl+Shift+D`, updating every 2s via refs)
 
 ## Verification Plan
-- Compile and lint applet.
-- Test dragging the badge in development preview across desktop and touch devices.
+- Compile applet (`compile_applet`) and run linter (`lint_applet`).
+- Verify smooth playback, quality selector, wake lock, and debug overlay.

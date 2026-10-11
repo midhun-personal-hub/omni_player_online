@@ -48,6 +48,10 @@ interface PeerConnectionEntry {
   iceCandidateQueue: RTCIceCandidateInit[];
 }
 
+const CALL_WIDTH = 640;
+const CALL_HEIGHT = 360;
+const CALL_FPS = 24;
+
 export class CallManager {
   private localStream: MediaStream | null = null;
   private myPeerId: string | null = null;
@@ -60,6 +64,8 @@ export class CallManager {
   private bandwidthSaver: boolean = false;
   private quality: CallQuality = 'medium';
   private duckingEnabled: boolean = true;
+  private poorNetwork: boolean = false;
+  private goodStatsCounter: number = 0;
 
   // Active peer connections: peerId -> PeerConnectionEntry
   private peerConnections: Map<string, PeerConnectionEntry> = new Map();
@@ -362,9 +368,9 @@ export class CallManager {
         const newStream = await navigator.mediaDevices.getUserMedia({
           video: {
             deviceId: { exact: deviceId },
-            width: { ideal: 320 },
-            height: { ideal: 240 },
-            frameRate: { ideal: 15, max: 15 },
+            width: { ideal: 640 },
+            height: { ideal: 360 },
+            frameRate: { ideal: 24, max: 24 },
           },
         });
         const newVideoTrack = newStream.getVideoTracks()[0];
@@ -416,9 +422,9 @@ export class CallManager {
     try {
       const constraints: MediaStreamConstraints = {
         video: {
-          width: { ideal: 320 },
-          height: { ideal: 240 },
-          frameRate: { ideal: 15, max: 15 },
+          width: { ideal: 640 },
+          height: { ideal: 360 },
+          frameRate: { ideal: 24, max: 24 },
           facingMode: 'user',
           ...(this.selectedVideoDeviceId ? { deviceId: { exact: this.selectedVideoDeviceId } } : {}),
         },
@@ -598,16 +604,22 @@ export class CallManager {
       }
     };
 
+    const isDebug = () => typeof window !== 'undefined' && window.location.search.includes('debug=1');
+
     // 3. onsignalingstatechange (Required for verification)
     pc.onsignalingstatechange = () => {
-      console.log(`[WebRTC Call] signalingState for peer ${remotePeerId}: ${pc.signalingState}`);
+      if (isDebug()) {
+        console.log(`[call] signalingState for peer ${remotePeerId}: ${pc.signalingState}`);
+      }
     };
 
     // 4. onconnectionstatechange (Required for verification)
     pc.onconnectionstatechange = () => {
-      console.log(`[WebRTC Call] connectionState for peer ${remotePeerId}: ${pc.connectionState}`);
+      if (isDebug()) {
+        console.log(`[call] connectionState for peer ${remotePeerId}: ${pc.connectionState}`);
+      }
       if (pc.connectionState === 'failed') {
-        console.warn(`[WebRTC Call] Connection failed with ${remotePeerId}, attempting ICE restart.`);
+        console.warn(`[call] Connection failed with ${remotePeerId}, attempting ICE restart.`);
         try {
           pc.restartIce();
         } catch {}
@@ -618,7 +630,9 @@ export class CallManager {
 
     // 5. oniceconnectionstatechange
     pc.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC Call] iceConnectionState for peer ${remotePeerId}: ${pc.iceConnectionState}`);
+      if (isDebug()) {
+        console.log(`[call] iceConnectionState for peer ${remotePeerId}: ${pc.iceConnectionState}`);
+      }
     };
 
     // 6. ontrack (Required for verification & handles late-arriving tracks)
@@ -907,27 +921,55 @@ export class CallManager {
     }
   }
 
-  private applyBandwidthLimitsToPC(pc: RTCPeerConnection) {
-    const cfg = QUALITY_CONFIG[this.quality];
+  private async applyCameraConstraints(width: number, height: number, frameRate: number) {
+    if (!this.localStream) return;
+    const videoTrack = this.localStream.getVideoTracks()[0];
+    if (videoTrack && typeof videoTrack.applyConstraints === 'function') {
+      try {
+        await videoTrack.applyConstraints({
+          width: { ideal: width },
+          height: { ideal: height },
+          frameRate: { ideal: frameRate, max: frameRate },
+        });
+      } catch (err) {
+        console.warn('Failed to apply camera constraints:', err);
+      }
+    }
+  }
 
+  private applyBandwidthLimitsToPC(pc: RTCPeerConnection) {
     try {
       const senders = pc.getSenders();
       for (const sender of senders) {
         if (sender.track?.kind === 'video') {
+          sender.track.contentHint = 'motion';
           const params = sender.getParameters();
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          params.encodings[0].maxBitrate = cfg.maxBitrate;
-          params.encodings[0].maxFramerate = cfg.maxFps;
-          params.encodings[0].scaleResolutionDownBy = cfg.scaleDown;
+          params.encodings[0].maxBitrate = this.poorNetwork ? 200_000 : 400_000;
+          params.encodings[0].maxFramerate = this.poorNetwork ? 15 : 24;
+          params.encodings[0].scaleResolutionDownBy = 1;
+          params.degradationPreference = 'maintain-framerate';
           sender.setParameters(params).catch(() => {});
+          try {
+            if (typeof (sender as any).generateKeyFrame === 'function') {
+              (sender as any).generateKeyFrame();
+            } else if (sender.track) {
+              const enabled = sender.track.enabled;
+              sender.track.enabled = !enabled;
+              setTimeout(() => { if (sender.track) sender.track.enabled = enabled; }, 50);
+            }
+          } catch {}
         } else if (sender.track?.kind === 'audio') {
+          sender.track.contentHint = 'speech';
           const params = sender.getParameters();
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
           params.encodings[0].maxBitrate = 32_000;
+          params.encodings[0].priority = 'high';
+          (params.encodings[0] as any).networkPriority = 'high';
           sender.setParameters(params).catch(() => {});
         }
       }
@@ -1060,33 +1102,59 @@ export class CallManager {
     if (this.stutterInterval) return;
 
     this.consecutiveBadStats = 0;
+    this.goodStatsCounter = 0;
+
     this.stutterInterval = window.setInterval(async () => {
       if (!this.inCall || this.peerConnections.size === 0) return;
+
+      const isDebug = () => typeof window !== 'undefined' && window.location.search.includes('debug=1');
 
       for (const entry of this.peerConnections.values()) {
         try {
           const stats = await entry.pc.getStats();
           let packetsLost = 0;
           let packetsSent = 0;
+          let fps = 24;
+          let jitter = 0;
+          let rtt = 0;
 
           stats.forEach((report) => {
             if (report.type === 'outbound-rtp' && report.kind === 'video') {
               packetsSent += report.packetsSent || 0;
+              fps = report.framesPerSecond || fps;
             }
             if (report.type === 'remote-inbound-rtp' && report.kind === 'video') {
               packetsLost += report.packetsLost || 0;
+              jitter = report.jitter || 0;
+              rtt = report.roundTripTime || 0;
             }
           });
 
-          if (packetsSent > 100) {
-            const lossRate = packetsLost / (packetsLost + packetsSent);
-            if (lossRate > 0.05) {
-              this.consecutiveBadStats++;
-              if (this.consecutiveBadStats >= 2 && !this.bandwidthSaver) {
-                this.callbacks.onStutterWarning(true);
+          if (isDebug()) {
+            console.log(`[call stats] fps: ${fps}, packetsLost: ${packetsLost}, jitter: ${Math.round(jitter * 1000)}ms, rtt: ${Math.round(rtt * 1000)}ms`);
+          }
+
+          const lossRate = packetsSent > 0 ? packetsLost / (packetsLost + packetsSent) : 0;
+          if (lossRate > 0.05 || fps < 12) {
+            this.consecutiveBadStats++;
+            this.goodStatsCounter = 0;
+            if (this.consecutiveBadStats >= 2 && !this.poorNetwork) {
+              this.poorNetwork = true;
+              console.warn('[call quality guard] Poor network detected (loss > 5% or fps < 12). Stepping down camera to 320x180, 15fps, 200kbps.');
+              this.applyBandwidthLimits();
+              this.applyCameraConstraints(320, 180, 15);
+            }
+          } else {
+            this.consecutiveBadStats = Math.max(0, this.consecutiveBadStats - 1);
+            if (this.poorNetwork) {
+              this.goodStatsCounter++;
+              if (this.goodStatsCounter >= 10) {
+                this.poorNetwork = false;
+                this.goodStatsCounter = 0;
+                console.info('[call quality guard] Good network stats for 30s. Stepping back up to 640x360, 24fps, 400kbps.');
+                this.applyBandwidthLimits();
+                this.applyCameraConstraints(CALL_WIDTH, CALL_HEIGHT, CALL_FPS);
               }
-            } else {
-              this.consecutiveBadStats = Math.max(0, this.consecutiveBadStats - 1);
             }
           }
         } catch {}

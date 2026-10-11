@@ -69,6 +69,24 @@ const RemoteVideoTile: React.FC<RemoteVideoTileProps> = ({ participant }) => {
     }
   }, [participant.stream]);
 
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !participant.stream) return;
+    const start = performance.now();
+    const handleFirstFrame = () => {
+      const elapsed = performance.now() - start;
+      if (typeof window !== 'undefined' && window.location.search.includes('debug=1')) {
+        console.log(`[call startup] First video frame rendered in ${Math.round(elapsed)}ms for participant ${participant.peerId}`);
+      }
+    };
+    if ('requestVideoFrameCallback' in el) {
+      (el as any).requestVideoFrameCallback(handleFirstFrame);
+    } else {
+      (el as any).addEventListener('loadeddata', handleFirstFrame, { once: true });
+      (el as any).addEventListener('resize', handleFirstFrame, { once: true });
+    }
+  }, [participant.stream]);
+
   const initial = (participant.name || 'F').charAt(0).toUpperCase();
 
   return (

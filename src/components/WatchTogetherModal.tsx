@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   X,
   Users,
@@ -12,8 +12,23 @@ import {
   LogOut,
   Loader2,
   ShieldAlert,
+  Send,
+  HardDrive,
+  Trash2,
+  Play,
+  CheckCircle2,
 } from 'lucide-react';
 import { WatchPartyRole, WatchPartyStatus, MovieQuality } from '../utils/watchParty';
+import { TransferProgress } from '../utils/fileTransfer';
+import { movieStore, MovieRecord, getStorageEstimate } from '../utils/movieStore';
+import { formatFileSize } from '../utils/formatters';
+import {
+  getConfiguredStorageLimit,
+  setConfiguredStorageLimit,
+  getAutoCleanDays,
+  setAutoCleanDays,
+  analyzeStorageCache,
+} from '../utils/cacheManager';
 
 interface WatchTogetherModalProps {
   isOpen: boolean;
@@ -33,6 +48,15 @@ interface WatchTogetherModalProps {
   onRename?: (newName: string) => void;
   movieQuality?: MovieQuality;
   onChangeMovieQuality?: (quality: MovieQuality) => void;
+  currentMediaFile?: File;
+  transferProgress?: TransferProgress | null;
+  onStartFileTransfer?: (file: File) => Promise<void>;
+  onPauseFileTransfer?: (peerId?: string) => void;
+  onResumeFileTransfer?: (peerId?: string) => void;
+  onCancelFileTransfer?: (peerId?: string) => void;
+  pausePlaybackWhileSending?: boolean;
+  onTogglePausePlaybackWhileSending?: (val: boolean) => void;
+  onPlayDownloadedMovie?: (file: File) => void;
 }
 
 export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
@@ -53,6 +77,15 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
   onRename,
   movieQuality = '720p',
   onChangeMovieQuality,
+  currentMediaFile,
+  transferProgress,
+  onStartFileTransfer,
+  onPauseFileTransfer,
+  onResumeFileTransfer,
+  onCancelFileTransfer,
+  pausePlaybackWhileSending = true,
+  onTogglePausePlaybackWhileSending,
+  onPlayDownloadedMovie,
 }) => {
   const [activeTab, setActiveTab] = useState<'create' | 'join'>(
     role === 'guest' ? 'join' : 'create'
@@ -68,6 +101,81 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
   const [copied, setCopied] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [localError, setLocalError] = useState<string | null>(null);
+
+  const [downloadedMovies, setDownloadedMovies] = useState<MovieRecord[]>([]);
+  const [storageEstimate, setStorageEstimate] = useState<{ usage: number; quota: number }>({
+    usage: 0,
+    quota: 0,
+  });
+  const [deleteOnLeave, setDeleteOnLeave] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('omniplay-delete-on-leave') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  // Phase 3B: Storage Limit & Auto Clean Settings
+  const [storageLimitBytes, setStorageLimitBytes] = useState<number>(() => getConfiguredStorageLimit());
+  const [autoCleanDays, setAutoCleanDaysState] = useState<number>(() => getAutoCleanDays());
+  const [lruCandidates, setLruCandidates] = useState<MovieRecord[]>([]);
+  const [selectedLruFingerprints, setSelectedLruFingerprints] = useState<Set<string>>(new Set());
+  const [showCleanupPrompt, setShowCleanupPrompt] = useState<boolean>(false);
+
+  const refreshDownloadedMovies = useCallback(async () => {
+    try {
+      const list = await movieStore.listMovies();
+      setDownloadedMovies(list);
+      const est = await getStorageEstimate();
+      setStorageEstimate(est);
+
+      // Analyze cache and check if limit is exceeded
+      const analysis = await analyzeStorageCache();
+      if (analysis.exceedsLimit && analysis.candidatesForDeletion.length > 0) {
+        setLruCandidates(analysis.candidatesForDeletion);
+        // Pre-select oldest movie
+        setSelectedLruFingerprints(new Set([analysis.candidatesForDeletion[0].fingerprint]));
+        setShowCleanupPrompt(true);
+      } else {
+        setShowCleanupPrompt(false);
+      }
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      refreshDownloadedMovies();
+    }
+  }, [isOpen, refreshDownloadedMovies]);
+
+  const handlePlayDownloaded = async (m: MovieRecord) => {
+    const file = await movieStore.getMovieFile(m.fingerprint);
+    if (file) {
+      onPlayDownloadedMovie?.(file);
+      onClose();
+    } else {
+      onShowToast('Could not load movie file');
+    }
+  };
+
+  const handleDeleteDownloaded = async (m: MovieRecord) => {
+    await movieStore.deleteMovie(m.fingerprint);
+    await refreshDownloadedMovies();
+    onShowToast(`Deleted "${m.name}"`);
+  };
+
+  const handleClearAll = async () => {
+    await movieStore.clearAllMovies();
+    await refreshDownloadedMovies();
+    onShowToast('All downloaded movies cleared');
+  };
+
+  const handleToggleDeleteOnLeave = (checked: boolean) => {
+    setDeleteOnLeave(checked);
+    try {
+      localStorage.setItem('omniplay-delete-on-leave', String(checked));
+    } catch {}
+  };
 
   // Check captureStream support
   const isCaptureSupported =
@@ -391,6 +499,122 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Send Movie File to Viewers */}
+                  <div className="p-3.5 rounded-xl bg-zinc-800/40 border border-zinc-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <span className="text-xs font-semibold text-zinc-100 flex items-center gap-1.5">
+                          <Send className="w-3.5 h-3.5 text-sky-400" />
+                          Send File to Viewers
+                        </span>
+                        <span className="text-[11px] text-zinc-400 block">
+                          Transfers original video file directly for stutter-free local playback
+                        </span>
+                      </div>
+                    </div>
+
+                    {currentMediaFile ? (
+                      <div className="space-y-2.5">
+                        <div className="flex items-center justify-between text-xs p-2 rounded-lg bg-zinc-900/60 border border-zinc-800">
+                          <span className="truncate max-w-[200px] text-zinc-300 font-medium">
+                            {currentMediaFile.name}
+                          </span>
+                          <span className="text-zinc-500 text-[11px]">
+                            {formatFileSize(currentMediaFile.size)}
+                          </span>
+                        </div>
+
+                        {/* Option: Pause playback while sending */}
+                        <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={pausePlaybackWhileSending}
+                            onChange={(e) =>
+                              onTogglePausePlaybackWhileSending?.(e.target.checked)
+                            }
+                            className="rounded border-zinc-700 bg-zinc-900 text-sky-500 focus:ring-0"
+                          />
+                          <span>Pause playback while sending (recommended)</span>
+                        </label>
+
+                        {/* Transfer active progress */}
+                        {transferProgress && transferProgress.status === 'transferring' ? (
+                          <div className="space-y-2 p-2.5 rounded-lg bg-sky-950/20 border border-sky-800/40">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-sky-300 font-semibold flex items-center gap-1.5">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Sending: {transferProgress.percentage}%
+                              </span>
+                              <span className="text-zinc-400 text-[11px]">
+                                {((transferProgress.speedBytesPerSec || 0) / (1024 * 1024)).toFixed(1)} MB/s
+                                {transferProgress.etaSeconds > 0
+                                  ? ` • ~${Math.ceil(transferProgress.etaSeconds / 60)} min`
+                                  : ''}
+                              </span>
+                            </div>
+
+                            <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-sky-500 rounded-full transition-all duration-300"
+                                style={{ width: `${transferProgress.percentage}%` }}
+                              />
+                            </div>
+
+                            <div className="flex items-center gap-2 pt-1">
+                              {transferProgress.isPaused ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onResumeFileTransfer?.()}
+                                  className="px-2.5 py-1 text-[11px] font-semibold rounded bg-sky-500 text-zinc-950 hover:bg-sky-400 transition-colors"
+                                >
+                                  Resume
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => onPauseFileTransfer?.()}
+                                  className="px-2.5 py-1 text-[11px] font-semibold rounded bg-zinc-800 text-zinc-300 hover:text-white transition-colors"
+                                >
+                                  Pause
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => onCancelFileTransfer?.()}
+                                className="px-2.5 py-1 text-[11px] font-semibold rounded bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 transition-colors"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : transferProgress && transferProgress.status === 'completed' ? (
+                          <div className="flex items-center gap-1.5 p-2 rounded-lg bg-emerald-950/30 border border-emerald-800/50 text-xs text-emerald-300">
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            <span>Transfer complete! Guests are on local playback.</span>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onStartFileTransfer?.(currentMediaFile)}
+                            disabled={viewerCount === 0}
+                            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            <span>
+                              {viewerCount === 0
+                                ? 'Wait for viewers to join room'
+                                : 'Send File to Viewers'}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-[11px] text-zinc-400">
+                        Open a local movie file in OmniPlay to send it to viewers.
+                      </p>
+                    )}
+                  </div>
+
                   {/* Close Room Button */}
                   <button
                     onClick={() => {
@@ -505,6 +729,230 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
               )}
             </div>
           )}
+
+          {/* Downloaded Movies List & Storage Management */}
+          <div className="pt-3 border-t border-zinc-800/80 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <span className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                  <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
+                  Downloaded Movies
+                </span>
+                <span className="text-[11px] text-zinc-400 block">
+                  {storageEstimate.quota > 0
+                    ? `Storage: ${formatFileSize(storageEstimate.usage)} used of ${formatFileSize(storageEstimate.quota)}`
+                    : 'Origin Private File System (OPFS)'}
+                </span>
+              </div>
+
+              {downloadedMovies.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearAll}
+                  className="text-[11px] text-zinc-400 hover:text-rose-300 transition-colors"
+                >
+                  Clear all
+                </button>
+              )}
+            </div>
+
+            {/* Phase 3B: Storage Limit & Auto Clean Settings */}
+            <div className="p-2.5 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-2.5 text-xs">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] text-zinc-300">
+                  <span>Storage limit cap</span>
+                  <span className="font-semibold text-sky-400">
+                    {formatFileSize(storageLimitBytes)}
+                  </span>
+                </div>
+                {/* Usage Bar */}
+                <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      storageEstimate.usage > storageLimitBytes ? 'bg-rose-500' : 'bg-emerald-500'
+                    }`}
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        storageLimitBytes > 0 ? (storageEstimate.usage / storageLimitBytes) * 100 : 0
+                      )}%`,
+                    }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-zinc-500">
+                  <span>Used: {formatFileSize(storageEstimate.usage)}</span>
+                  <span>Free quota: {formatFileSize(Math.max(0, storageEstimate.quota - storageEstimate.usage))}</span>
+                </div>
+              </div>
+
+              {/* Limit selector */}
+              <div className="flex items-center justify-between gap-1 pt-1 border-t border-zinc-800/60">
+                <span className="text-[11px] text-zinc-400">Cap limit:</span>
+                <div className="flex items-center gap-1">
+                  {[5 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024, 20 * 1024 * 1024 * 1024].map((bytes) => (
+                    <button
+                      key={bytes}
+                      type="button"
+                      onClick={() => {
+                        setStorageLimitBytes(bytes);
+                        setConfiguredStorageLimit(bytes);
+                        refreshDownloadedMovies();
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                        storageLimitBytes === bytes
+                          ? 'bg-sky-500 text-zinc-950 font-bold'
+                          : 'bg-zinc-800 text-zinc-300 hover:text-white'
+                      }`}
+                    >
+                      {bytes / (1024 * 1024 * 1024)} GB
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Auto Clean Option */}
+              <div className="flex items-center justify-between gap-1 pt-1 border-t border-zinc-800/60">
+                <span className="text-[11px] text-zinc-400">Auto-delete unwatched:</span>
+                <div className="flex items-center gap-1">
+                  {[0, 7, 30].map((days) => (
+                    <button
+                      key={days}
+                      type="button"
+                      onClick={() => {
+                        setAutoCleanDaysState(days);
+                        setAutoCleanDays(days);
+                      }}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                        autoCleanDays === days
+                          ? 'bg-sky-500 text-zinc-950 font-bold'
+                          : 'bg-zinc-800 text-zinc-300 hover:text-white'
+                      }`}
+                    >
+                      {days === 0 ? 'Off' : `${days}d`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* LRU Cleanup Dialog Banner (if limit exceeded) */}
+            {showCleanupPrompt && lruCandidates.length > 0 && (
+              <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-600/40 text-xs space-y-2 animate-in fade-in">
+                <div className="flex items-center justify-between text-amber-300 font-semibold text-[11px]">
+                  <span>Storage limit exceeded</span>
+                  <span>Delete oldest?</span>
+                </div>
+                <p className="text-[10px] text-zinc-300">
+                  Select complete movies to remove to make room for new viewings:
+                </p>
+                <div className="space-y-1 max-h-24 overflow-y-auto pr-1">
+                  {lruCandidates.map((m) => (
+                    <label
+                      key={m.fingerprint}
+                      className="flex items-center justify-between p-1.5 rounded bg-zinc-900/80 border border-zinc-800 cursor-pointer"
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0 pr-1">
+                        <input
+                          type="checkbox"
+                          checked={selectedLruFingerprints.has(m.fingerprint)}
+                          onChange={(e) => {
+                            const next = new Set(selectedLruFingerprints);
+                            if (e.target.checked) next.add(m.fingerprint);
+                            else next.delete(m.fingerprint);
+                            setSelectedLruFingerprints(next);
+                          }}
+                          className="rounded border-zinc-700 bg-zinc-950 text-amber-500 w-3 h-3 focus:ring-0"
+                        />
+                        <span className="truncate text-[11px] text-zinc-200">{m.name}</span>
+                      </div>
+                      <span className="text-[10px] text-zinc-400 shrink-0">
+                        {formatFileSize(m.size)}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex items-center justify-end gap-1.5 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowCleanupPrompt(false)}
+                    className="px-2 py-0.5 rounded text-[10px] text-zinc-400 hover:text-white"
+                  >
+                    Dismiss
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      for (const fp of selectedLruFingerprints) {
+                        await movieStore.deleteMovie(fp);
+                      }
+                      await refreshDownloadedMovies();
+                      onShowToast('Cleaned selected movies');
+                    }}
+                    className="px-2.5 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-[10px]"
+                  >
+                    Confirm Delete
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Toggle: Delete after leaving room */}
+            <label className="flex items-center justify-between text-xs text-zinc-300 cursor-pointer p-2 rounded-lg bg-zinc-900/40 border border-zinc-800">
+              <span className="text-[11px] text-zinc-300">Delete downloaded files on leave</span>
+              <input
+                type="checkbox"
+                checked={deleteOnLeave}
+                onChange={(e) => handleToggleDeleteOnLeave(e.target.checked)}
+                className="rounded border-zinc-700 bg-zinc-900 text-sky-500 focus:ring-0 cursor-pointer"
+              />
+            </label>
+
+            {/* Movies list */}
+            {downloadedMovies.length === 0 ? (
+              <p className="text-[11px] text-zinc-500 py-1 text-center">
+                No downloaded movies stored on this device.
+              </p>
+            ) : (
+              <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                {downloadedMovies.map((m) => (
+                  <div
+                    key={m.fingerprint}
+                    className="flex items-center justify-between p-2 rounded-lg bg-zinc-900/60 border border-zinc-800 text-xs"
+                  >
+                    <div className="min-w-0 pr-2">
+                      <span className="block truncate text-zinc-200 font-medium text-[11px]">
+                        {m.name}
+                      </span>
+                      <span className="text-[10px] text-zinc-500">
+                        {formatFileSize(m.size)} • {m.complete ? 'Complete' : 'Incomplete'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      {m.complete && (
+                        <button
+                          type="button"
+                          onClick={() => handlePlayDownloaded(m)}
+                          className="p-1 rounded hover:bg-zinc-800 text-emerald-400 hover:text-emerald-300"
+                          title="Play movie"
+                        >
+                          <Play className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteDownloaded(m)}
+                        className="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-rose-400"
+                        title="Delete movie"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
