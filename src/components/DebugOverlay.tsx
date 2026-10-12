@@ -35,6 +35,16 @@ export const DebugOverlay: React.FC = () => {
 
       try {
         const stats = await moviePc.getStats();
+        let videoCodec = '';
+        stats.forEach((report) => {
+          if (report.type === 'codec' && report.mimeType?.toLowerCase().includes('video')) {
+            videoCodec = report.mimeType;
+          }
+        });
+        if (videoCodec) {
+          info += `Negotiated Codec: ${videoCodec} | Mode: maintain-framerate\n`;
+        }
+
         stats.forEach((report) => {
           if (report.type === 'outbound-rtp' && report.kind === 'video') {
             info += `[Host Outbound] Res: ${report.frameWidth}x${report.frameHeight} | FPS: ${report.framesPerSecond ?? 'N/A'} | Reason: ${report.qualityLimitationReason || 'none'}\n`;

@@ -297,6 +297,25 @@ export function useWatchParty(options?: {
   useEffect(() => {
     const unsubRoster = watchPartyService.onRoster((peers) => {
       callManagerRef.current?.setRoster(peers);
+
+      // Phase 3C: Mesh P2P piece sharing between guests (only when 2+ guests)
+      const myPeerId = watchPartyService.getMyPeerId();
+      const currentRole = watchPartyService.getRole();
+      if (currentRole === 'guest' && myPeerId) {
+        // Find other guests (excluding host and self)
+        const otherGuests = peers.filter(
+          (p) => p.id !== 'host' && p.id !== myPeerId && !p.id.startsWith('OMNI-')
+        );
+        // Only when there are 2+ guests total (self + at least one other guest)
+        if (otherGuests.length >= 1) {
+          otherGuests.forEach((g) => {
+            // Deterministic initiator to avoid duplicate symmetric connections
+            if (myPeerId < g.id) {
+              watchPartyService.connectToMeshPeer(g.id);
+            }
+          });
+        }
+      }
     });
     return () => {
       unsubRoster();
@@ -432,11 +451,27 @@ export function useWatchParty(options?: {
         mediaEl.srcObject = null;
       }
 
-      const captured: MediaStream | null = (mediaEl as any).captureStream
-        ? (mediaEl as any).captureStream(30)
-        : mediaEl.mozCaptureStream
-        ? mediaEl.mozCaptureStream()
-        : null;
+      let captured: MediaStream | null = null;
+      try {
+        if (typeof (mediaEl as any).captureStream === 'function') {
+          captured = (mediaEl as any).captureStream(30);
+        } else if (typeof (mediaEl as any).mozCaptureStream === 'function') {
+          captured = (mediaEl as any).mozCaptureStream(30);
+        }
+      } catch (err) {
+        console.warn('[OmniPlay Host] captureStream(30) fallback:', err);
+        try {
+          if (typeof (mediaEl as any).captureStream === 'function') {
+            captured = (mediaEl as any).captureStream();
+          }
+        } catch {}
+      }
+
+      // Propagate source video resolution to watchPartyService for scaleResolutionDownBy calculation
+      const videoEl = el as HTMLVideoElement;
+      if (videoEl.videoWidth && videoEl.videoHeight) {
+        watchPartyService.setSourceDimensions(videoEl.videoWidth, videoEl.videoHeight);
+      }
 
       const audioTrack = audioEngine.getCaptureAudioTrack();
       const combined = new MediaStream();
@@ -468,7 +503,24 @@ export function useWatchParty(options?: {
 
   useEffect(() => {
     updateCapturedStream();
-  }, [updateCapturedStream, currentMediaUrl]);
+
+    const el = getMediaElement();
+    if (!el || role !== 'host') return;
+
+    const handleMeta = () => {
+      const v = el as HTMLVideoElement;
+      if (v.videoWidth && v.videoHeight) {
+        watchPartyService.setSourceDimensions(v.videoWidth, v.videoHeight);
+      }
+    };
+
+    el.addEventListener('loadedmetadata', handleMeta);
+    el.addEventListener('resize', handleMeta);
+    return () => {
+      el.removeEventListener('loadedmetadata', handleMeta);
+      el.removeEventListener('resize', handleMeta);
+    };
+  }, [updateCapturedStream, currentMediaUrl, getMediaElement, role]);
 
   // Host: Heartbeat interval (every 2 seconds)
   useEffect(() => {

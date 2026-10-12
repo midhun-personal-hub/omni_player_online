@@ -197,6 +197,7 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
   // Phase 3A: "I already have this file" state
   const [showOwnCopyPrompt, setShowOwnCopyPrompt] = useState<boolean>(false);
   const [isUsingOwnCopy, setIsUsingOwnCopy] = useState<boolean>(false);
+  const [ownCopyError, setOwnCopyError] = useState<string | null>(null);
   const ownFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Phase 3D: Resume position state
@@ -204,29 +205,29 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
 
   // Show "Download from host" vs "Use my own copy" prompt when manifest arrives
   useEffect(() => {
-    if (transferProgress && transferProgress.status === 'transferring' && !isLocalPlayback && !isUsingOwnCopy) {
-      const receiver = fileTransferManager.getGuestReceiver();
-      if (receiver && receiver.manifest) {
+    const receiver = fileTransferManager.getGuestReceiver();
+    if (receiver && receiver.manifest) {
+      if (transferProgress && transferProgress.status === 'transferring' && !isLocalPlayback && !isUsingOwnCopy) {
         setShowOwnCopyPrompt(true);
+      }
 
-        // Check if last playback position exists
-        const lastPos = getLastPlaybackPosition(receiver.manifest.fingerprint);
-        if (lastPos && Math.abs(hostState.currentTime - lastPos) > 15) {
-          setResumePromptTime(lastPos);
-        }
+      // Check if last playback position exists: offer only when host hasn't set a different start time
+      const lastPos = getLastPlaybackPosition(receiver.manifest.fingerprint);
+      if (lastPos && hostState.currentTime <= 10 && lastPos > 15) {
+        setResumePromptTime(lastPos);
       }
     }
   }, [transferProgress, isLocalPlayback, isUsingOwnCopy, hostState.currentTime]);
 
   // Track and save current playback position
   useEffect(() => {
-    if (isLocalPlayback && hostState.currentTime > 10) {
+    if (hostState.currentTime > 10) {
       const receiver = fileTransferManager.getGuestReceiver();
       if (receiver && receiver.manifest) {
         saveLastPlaybackPosition(receiver.manifest.fingerprint, hostState.currentTime);
       }
     }
-  }, [isLocalPlayback, hostState.currentTime]);
+  }, [hostState.currentTime]);
 
   const handleSelectOwnCopy = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -242,14 +243,17 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
     );
 
     if (check.matches) {
-      // Use own copy directly
+      // Use own copy directly with URL.createObjectURL and sync timestamps only:
+      // Cancel receiver transfer to stop network requests and prevent copying into storage
+      receiver.cancel();
       setIsUsingOwnCopy(true);
       setShowOwnCopyPrompt(false);
+      setOwnCopyError(null);
       const objUrl = URL.createObjectURL(file);
       fileTransferManager.activateProgressiveMode(objUrl);
       onActivateProgressivePlayback?.(objUrl);
     } else {
-      alert("This isn't the same file. You can download it directly from the host.");
+      setOwnCopyError("This isn't the same file. You can download it directly from the host.");
     }
 
     if (ownFileInputRef.current) {
@@ -721,17 +725,28 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
           <div className="text-[11px] font-medium text-zinc-200">
             Playing this movie together. Do you have this file locally?
           </div>
+          {ownCopyError && (
+            <div className="p-1.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[10px] leading-tight">
+              {ownCopyError}
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              onClick={() => ownFileInputRef.current?.click()}
+              onClick={() => {
+                setOwnCopyError(null);
+                ownFileInputRef.current?.click();
+              }}
               className="px-2 py-1 rounded bg-sky-500 hover:bg-sky-400 text-zinc-950 font-bold text-[10px] transition-colors"
             >
               Use my own copy
             </button>
             <button
               type="button"
-              onClick={() => setShowOwnCopyPrompt(false)}
+              onClick={() => {
+                setShowOwnCopyPrompt(false);
+                setOwnCopyError(null);
+              }}
               className="px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[10px] transition-colors"
             >
               Download from host
@@ -741,7 +756,7 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
       )}
 
       {/* Resume from mm:ss Prompt */}
-      {resumePromptTime !== null && !isLocalPlayback && (
+      {resumePromptTime !== null && (
         <div className="absolute top-44 left-4 z-30 max-w-xs p-2.5 rounded-xl bg-zinc-900/95 border border-amber-500/40 text-xs shadow-2xl backdrop-blur-md flex items-center justify-between gap-2 animate-in fade-in">
           <span className="text-[11px] text-amber-300">
             Resume from {formatTime(resumePromptTime)}?
@@ -750,6 +765,9 @@ export const GuestPlayer: React.FC<GuestPlayerProps> = ({
             <button
               type="button"
               onClick={() => {
+                if (videoRef.current && (isLocalPlayback || isUsingOwnCopy)) {
+                  videoRef.current.currentTime = resumePromptTime;
+                }
                 onSendControl('seek', resumePromptTime);
                 setResumePromptTime(null);
               }}

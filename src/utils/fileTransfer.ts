@@ -8,6 +8,12 @@ import { DataConnection } from 'peerjs';
 import { movieStore, checkStorageAvailable, requestPersistentStorage } from './movieStore';
 import { analyzeStorageCache } from './cacheManager';
 import { meshP2PManager } from './meshP2PTransfer';
+import {
+  computeCanonicalFingerprint,
+  validateManifest,
+  isValidFingerprint,
+  computeCombinedFullHash,
+} from './fileIdentity';
 
 export const TRANSFER_PIECE_SIZE = 1024 * 1024; // 1 MB piece
 export const TRANSFER_CHUNK_SIZE = 16 * 1024; // 16 KB chunks
@@ -27,6 +33,7 @@ export interface MovieManifest {
   pieceSize: number;
   pieceCount: number;
   duration?: number;
+  fullFileHash?: string;
 }
 
 export type FileTransferMsg =
@@ -97,25 +104,11 @@ if (typeof window !== 'undefined') {
   (window as any).__omniplayTransferDebug = debugMetrics;
 }
 
-export async function computeFileFingerprint(file: File): Promise<string> {
-  const headSize = Math.min(file.size, 1024 * 1024);
-  const headSlice = await file.slice(0, headSize).arrayBuffer();
-
-  const tailStart = Math.max(0, file.size - 1024 * 1024);
-  const tailSlice = await file.slice(tailStart, file.size).arrayBuffer();
-
-  const textHeader = new TextEncoder().encode(`${file.size}:${file.name}:`);
-
-  const combined = new Uint8Array(
-    textHeader.byteLength + headSlice.byteLength + tailSlice.byteLength
-  );
-  combined.set(textHeader, 0);
-  combined.set(new Uint8Array(headSlice), textHeader.byteLength);
-  combined.set(new Uint8Array(tailSlice), textHeader.byteLength + headSlice.byteLength);
-
-  const hashBuffer = await crypto.subtle.digest('SHA-256', combined);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+/**
+ * Computes canonical movie fingerprint excluding filename.
+ */
+export async function computeFileFingerprint(file: File | Blob): Promise<string> {
+  return computeCanonicalFingerprint(file);
 }
 
 export async function computeBufferHash(buffer: ArrayBuffer): Promise<string> {
@@ -149,28 +142,50 @@ export function calculatePieceSendOrder(pieceCount: number, guestHas: Set<number
 }
 
 async function waitForBufferDrain(dc: RTCDataChannel): Promise<void> {
-  if (dc.bufferedAmount <= BUFFERED_AMOUNT_HIGH) return;
+  if (!dc || dc.readyState !== 'open') return;
+  if (dc.bufferedAmount <= BUFFERED_AMOUNT_LOW) return;
 
   return new Promise<void>((resolve) => {
     let resolved = false;
+    let poll: any;
+    let timeout: any;
+
     const finish = () => {
       if (!resolved) {
         resolved = true;
-        dc.removeEventListener('bufferedamountlow', onLow);
+        try {
+          dc.removeEventListener('bufferedamountlow', onLow);
+          dc.removeEventListener('close', finish);
+          dc.removeEventListener('error', finish);
+        } catch {}
         clearInterval(poll);
+        clearTimeout(timeout);
         resolve();
       }
     };
+
     const onLow = () => {
       if (dc.bufferedAmount <= BUFFERED_AMOUNT_LOW) finish();
     };
+
     try {
       dc.bufferedAmountLowThreshold = BUFFERED_AMOUNT_LOW;
     } catch {}
-    dc.addEventListener('bufferedamountlow', onLow);
-    const poll = setInterval(() => {
-      if (dc.bufferedAmount <= BUFFERED_AMOUNT_LOW) finish();
+
+    try {
+      dc.addEventListener('bufferedamountlow', onLow);
+      dc.addEventListener('close', finish);
+      dc.addEventListener('error', finish);
+    } catch {}
+
+    poll = setInterval(() => {
+      if (dc.readyState !== 'open' || dc.bufferedAmount <= BUFFERED_AMOUNT_LOW) {
+        finish();
+      }
     }, 50);
+
+    // Bounded safety timeout so sender is never permanently blocked
+    timeout = setTimeout(finish, 15000);
   });
 }
 
@@ -456,6 +471,7 @@ export class GuestTransferReceiver {
   public speedHistory: number[] = [];
   public lastPriorityPiece: number | null = null;
   public lastPriorityTime = 0;
+  private periodicBitmapInterval: any = null;
 
   private onProgressCallback?: (progress: TransferProgress) => void;
   private onReadyForLocalPlayback?: (file: File, objectUrl: string) => void;
@@ -515,20 +531,85 @@ export class GuestTransferReceiver {
   }
 
   private setupConnection() {
+    // Phase 3C: Register mesh piece receiver
+    meshP2PManager.setPieceReceivedCallback(async (index: number, buffer: ArrayBuffer) => {
+      if (!this.manifest || this.receivedPieces.has(index) || this.isCancelled) return;
+      const written = await movieStore.writePiece(this.manifest.fingerprint, index, buffer);
+      if (written) {
+        this.receivedPieces.add(index);
+        debugMetrics.piecesDone = this.receivedPieces.size;
+        if (typeof navigator !== 'undefined' && navigator.serviceWorker?.controller) {
+          navigator.serviceWorker.controller.postMessage({
+            type: 'piece-stored',
+            fingerprint: this.manifest.fingerprint,
+            index,
+          });
+        }
+        this.emitProgress();
+        meshP2PManager.updateLocalPieces(this.receivedPieces);
+        if (this.receivedPieces.size >= this.totalPieces) {
+          await this.handleDone(this.manifest.fingerprint);
+        }
+      }
+    });
+
+    // Phase 3C: Periodically update bitmap to host and mesh peers every 3 seconds
+    this.periodicBitmapInterval = setInterval(() => {
+      if (
+        this.manifest &&
+        (this.conn as any).open !== false &&
+        !this.isCancelled &&
+        !this.isPaused &&
+        this.receivedPieces.size < this.totalPieces
+      ) {
+        try {
+          this.conn.send({
+            type: 'have',
+            fingerprint: this.manifest.fingerprint,
+            pieces: Array.from(this.receivedPieces),
+          } satisfies FileTransferMsg);
+        } catch {}
+        meshP2PManager.updateLocalPieces(this.receivedPieces);
+        this.scheduleMeshPieceFetch();
+      }
+    }, 3000);
+
     this.conn.on('data', async (data: any) => {
       const msg = data as FileTransferMsg;
       if (!msg || !msg.type) return;
 
       switch (msg.type) {
         case 'manifest': {
+          const val = validateManifest(msg.manifest);
+          if (!val.valid) {
+            console.error('[Guest Transfer] Invalid manifest received:', val.error);
+            this.cancel();
+            this.onToast?.(`Invalid manifest: ${val.error}`);
+            return;
+          }
           await this.handleManifest(msg.manifest);
           break;
         }
 
         case 'piece-start': {
-          this.currentPieceIndex = msg.index;
-          this.currentPieceHash = msg.hash;
-          this.currentPieceBuffer = new Uint8Array(msg.size);
+          if (!this.manifest) return;
+          const { index, hash, size } = msg;
+          if (
+            typeof index !== 'number' ||
+            index < 0 ||
+            index >= this.totalPieces ||
+            !isValidFingerprint(hash) ||
+            typeof size !== 'number' ||
+            size <= 0 ||
+            size > this.manifest.pieceSize
+          ) {
+            console.error('[Guest Transfer] Malformed piece-start received');
+            this.cancel();
+            return;
+          }
+          this.currentPieceIndex = index;
+          this.currentPieceHash = hash;
+          this.currentPieceBuffer = new Uint8Array(size);
           break;
         }
 
@@ -536,7 +617,10 @@ export class GuestTransferReceiver {
           if (
             this.currentPieceBuffer &&
             this.currentPieceIndex === msg.index &&
-            msg.data instanceof ArrayBuffer
+            msg.data instanceof ArrayBuffer &&
+            typeof msg.offset === 'number' &&
+            msg.offset >= 0 &&
+            msg.offset + msg.data.byteLength <= this.currentPieceBuffer.byteLength
           ) {
             const chunkView = new Uint8Array(msg.data);
             this.currentPieceBuffer.set(chunkView, msg.offset);
@@ -597,6 +681,10 @@ export class GuestTransferReceiver {
 
     this.conn.on('close', () => {
       console.log('[Guest Transfer] Connection closed');
+      if (this.periodicBitmapInterval) {
+        clearInterval(this.periodicBitmapInterval);
+        this.periodicBitmapInterval = null;
+      }
     });
   }
 
@@ -691,8 +779,8 @@ export class GuestTransferReceiver {
       return;
     }
 
-    // Hash verified: write to store
-    const written = await movieStore.writePiece(this.manifest.fingerprint, index, actualBuffer);
+    // Hash verified: write to store with hash
+    const written = await movieStore.writePiece(this.manifest.fingerprint, index, actualBuffer, computedHash);
     if (written) {
       this.receivedPieces.add(index);
       debugMetrics.piecesDone = this.receivedPieces.size;
@@ -712,7 +800,29 @@ export class GuestTransferReceiver {
       meshP2PManager.updateLocalPieces(this.receivedPieces);
 
       if (this.receivedPieces.size >= this.totalPieces) {
-        await this.handleDone(this.manifest.fingerprint);
+        const record = await movieStore.getMovie(this.manifest.fingerprint);
+        if (record && !record.complete) {
+          const hashes = record.pieceHashes || {};
+          let allValid = true;
+          for (let i = 0; i < this.totalPieces; i++) {
+            if (!hashes[i]) {
+              allValid = false;
+              break;
+            }
+          }
+          if (allValid) {
+            if (this.manifest.fullFileHash) {
+              const computedFullHash = await computeCombinedFullHash(hashes, this.totalPieces);
+              if (computedFullHash.toLowerCase() !== this.manifest.fullFileHash.toLowerCase()) {
+                console.error('[Guest Transfer] Full-file hash verification failed!');
+                this.onToast?.('Full file integrity verification failed. Transfer corrupted.');
+                this.cancel();
+                return;
+              }
+            }
+            await this.handleDone(this.manifest.fingerprint);
+          }
+        }
       }
     } else {
       this.conn.send({ type: 'resend', index } satisfies FileTransferMsg);
@@ -776,10 +886,43 @@ export class GuestTransferReceiver {
 
   public cancel() {
     this.isCancelled = true;
+    if (this.periodicBitmapInterval) {
+      clearInterval(this.periodicBitmapInterval);
+      this.periodicBitmapInterval = null;
+    }
     try {
       this.conn.send({ type: 'cancel' } satisfies FileTransferMsg);
     } catch {}
     this.emitProgress();
+  }
+
+  private scheduleMeshPieceFetch() {
+    if (
+      !this.manifest ||
+      this.isPaused ||
+      this.isCancelled ||
+      this.receivedPieces.size >= this.totalPieces
+    ) {
+      return;
+    }
+    if (meshP2PManager.getConnectedPeerCount() === 0) return;
+
+    // Scan for missing pieces to fetch from mesh peers
+    for (let i = 0; i < this.totalPieces; i++) {
+      if (!this.receivedPieces.has(i)) {
+        const scheduled = meshP2PManager.requestPieceFromMesh(i, () => {
+          // On failure or 5s timeout, fall back to host as source of truth
+          if (!this.receivedPieces.has(i) && !this.isCancelled) {
+            try {
+              this.conn.send({ type: 'resend', index: i } satisfies FileTransferMsg);
+            } catch {}
+          }
+        });
+        if (scheduled) {
+          break; // Request one at a time to keep throughput steady
+        }
+      }
+    }
   }
 }
 
@@ -935,9 +1078,18 @@ export class FileTransferManager {
   ) {
     this.hostFile = file;
 
-    // Compute fingerprint
+    // Compute fingerprint and full-file hash
     const fingerprint = await computeFileFingerprint(file);
     const pieceCount = Math.ceil(file.size / TRANSFER_PIECE_SIZE);
+
+    const pieceHashes: Record<number, string> = {};
+    for (let i = 0; i < pieceCount; i++) {
+      const start = i * TRANSFER_PIECE_SIZE;
+      const end = Math.min(file.size, start + TRANSFER_PIECE_SIZE);
+      const slice = await file.slice(start, end).arrayBuffer();
+      pieceHashes[i] = await computeBufferHash(slice);
+    }
+    const fullFileHash = await computeCombinedFullHash(pieceHashes, pieceCount);
 
     this.hostManifest = {
       fingerprint,
@@ -947,6 +1099,7 @@ export class FileTransferManager {
       pieceSize: TRANSFER_PIECE_SIZE,
       pieceCount,
       duration: mediaDuration,
+      fullFileHash,
     };
 
     // Request wake lock

@@ -1,5 +1,6 @@
 import { Peer, DataConnection, MediaConnection } from 'peerjs';
 import { ChatMessage } from '../types/chat';
+import { meshP2PManager } from './meshP2PTransfer';
 
 export type WatchPartyStatus =
   | 'idle'
@@ -193,31 +194,125 @@ export const QUALITY_BITRATES: Record<'720p' | '1080p', number> = {
 
 export const DEFAULT_MOVIE_QUALITY: MovieQuality = '720p';
 
-export async function configureMovieSenderParameters(
+export interface MovieSenderConfig {
+  maxBitrate: number;
+  maxFramerate: number;
+  scaleResolutionDownBy: number;
+  degradationPreference: RTCDegradationPreference;
+}
+
+export type AdaptiveTier = 'high' | 'medium' | 'low';
+
+export function computeMovieSenderConfig(
+  quality: MovieQuality,
+  sourceHeight?: number,
+  inCall: boolean = false,
+  adaptiveTier: AdaptiveTier = 'high'
+): MovieSenderConfig {
+  let targetBitrate: number;
+  let targetHeight: number;
+
+  if (quality === '1080p') {
+    targetBitrate = QUALITY_BITRATES['1080p'];
+    targetHeight = 1080;
+  } else if (quality === '720p') {
+    targetBitrate = QUALITY_BITRATES['720p'];
+    targetHeight = 720;
+  } else {
+    // 'auto' mode adaptive tiers
+    if (adaptiveTier === 'high') {
+      targetBitrate = 4_500_000;
+      targetHeight = 1080;
+    } else if (adaptiveTier === 'medium') {
+      targetBitrate = 2_500_000;
+      targetHeight = 720;
+    } else {
+      // 'low'
+      targetBitrate = 1_200_000;
+      targetHeight = 540;
+    }
+  }
+
+  // Preserve call ducking: decrease movie bitrate slightly to preserve voice/cam quality
+  if (inCall) {
+    targetBitrate = Math.max(500_000, targetBitrate - 400_000);
+  }
+
+  // Scale resolution down if source is higher resolution than target.
+  // Avoid unnecessary downscaling for lower-resolution sources (e.g. 480p source stays 1.0).
+  let scaleResolutionDownBy = 1.0;
+  if (sourceHeight && sourceHeight > 0) {
+    if (sourceHeight > targetHeight) {
+      scaleResolutionDownBy = Math.round((sourceHeight / targetHeight) * 10) / 10;
+    } else {
+      scaleResolutionDownBy = 1.0;
+    }
+  }
+
+  return {
+    maxBitrate: targetBitrate,
+    maxFramerate: 30, // Cap at 30 FPS to reduce encoder load and prevent frame drops
+    scaleResolutionDownBy: Math.max(1.0, scaleResolutionDownBy),
+    degradationPreference: 'maintain-framerate', // Browser drops resolution rather than framerate
+  };
+}
+
+export async function applyMovieSenderParameters(
   sender: RTCRtpSender,
-  quality: MovieQuality = DEFAULT_MOVIE_QUALITY
+  config: MovieSenderConfig
 ): Promise<boolean> {
   try {
     const params = sender.getParameters();
+    if (!params) return false;
+
     if (!params.encodings || params.encodings.length === 0) {
       params.encodings = [{}];
     }
 
-    const targetBitrate =
-      quality === '1080p'
-        ? QUALITY_BITRATES['1080p']
-        : QUALITY_BITRATES['720p'];
+    // Preserve existing encoding properties without overwriting unrelated fields
+    const encoding = params.encodings[0];
+    encoding.maxBitrate = config.maxBitrate;
 
-    params.encodings[0].maxBitrate = targetBitrate;
-    params.encodings[0].scaleResolutionDownBy = 1;
-    params.degradationPreference = quality === 'auto' ? 'balanced' : 'maintain-resolution';
+    // Set maxFramerate cap where supported
+    if (config.maxFramerate > 0) {
+      encoding.maxFramerate = config.maxFramerate;
+    }
+
+    // Apply scaleResolutionDownBy based on source and target
+    if (config.scaleResolutionDownBy >= 1.0) {
+      encoding.scaleResolutionDownBy = config.scaleResolutionDownBy;
+    }
+
+    // Always prefer maintain-framerate so resolution steps down before frames drop
+    params.degradationPreference = config.degradationPreference;
 
     await sender.setParameters(params);
     return true;
   } catch (err) {
-    console.debug('Failed to setParameters on sender:', err);
+    // Attempt fallback with basic parameters if advanced fields caused rejection
+    try {
+      const fallbackParams = sender.getParameters();
+      if (fallbackParams.encodings && fallbackParams.encodings.length > 0) {
+        fallbackParams.encodings[0].maxBitrate = config.maxBitrate;
+        fallbackParams.degradationPreference = 'maintain-framerate';
+        await sender.setParameters(fallbackParams);
+        return true;
+      }
+    } catch {}
+    console.debug('[OmniPlay WebRTC] setParameters failed on video sender:', err);
     return false;
   }
+}
+
+export async function configureMovieSenderParameters(
+  sender: RTCRtpSender,
+  quality: MovieQuality = DEFAULT_MOVIE_QUALITY,
+  sourceHeight?: number,
+  inCall: boolean = false,
+  adaptiveTier: AdaptiveTier = 'high'
+): Promise<boolean> {
+  const config = computeMovieSenderConfig(quality, sourceHeight, inCall, adaptiveTier);
+  return applyMovieSenderParameters(sender, config);
 }
 
 export function applyCodecPreferences(transceiver: RTCRtpTransceiver): void {
@@ -231,19 +326,42 @@ export function applyCodecPreferences(transceiver: RTCRtpTransceiver): void {
 
   try {
     const capabilities = RTCRtpReceiver.getCapabilities('video');
-    if (!capabilities || !capabilities.codecs) return;
+    if (!capabilities || !capabilities.codecs || capabilities.codecs.length === 0) return;
 
     const codecs = capabilities.codecs;
-    const vp9Codecs = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/vp9');
+
+    // Prefer H.264 when supported: hardware acceleration on almost all devices, lowest CPU load
     const h264Codecs = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/h264');
+    // Prefer packetization-mode=1 for optimal streaming throughput
+    h264Codecs.sort((a, b) => {
+      const aMode = a.sdpFmtpLine?.includes('packetization-mode=1') ? 1 : 0;
+      const bMode = b.sdpFmtpLine?.includes('packetization-mode=1') ? 1 : 0;
+      return bMode - aMode;
+    });
+
+    const vp8Codecs = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/vp8');
+    const vp9Codecs = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/vp9');
+    const av1Codecs = codecs.filter((c) => c.mimeType.toLowerCase() === 'video/av1');
     const otherCodecs = codecs.filter(
       (c) =>
+        c.mimeType.toLowerCase() !== 'video/h264' &&
+        c.mimeType.toLowerCase() !== 'video/vp8' &&
         c.mimeType.toLowerCase() !== 'video/vp9' &&
-        c.mimeType.toLowerCase() !== 'video/h264'
+        c.mimeType.toLowerCase() !== 'video/av1'
     );
 
-    const preferredOrder = [...vp9Codecs, ...h264Codecs, ...otherCodecs];
-    transceiver.setCodecPreferences(preferredOrder);
+    // Retain compatible fallback codecs without forcing any unsupported codec
+    const preferredOrder = [
+      ...h264Codecs,
+      ...vp8Codecs,
+      ...vp9Codecs,
+      ...av1Codecs,
+      ...otherCodecs,
+    ];
+
+    if (preferredOrder.length > 0) {
+      transceiver.setCodecPreferences(preferredOrder);
+    }
   } catch (err) {
     console.warn('[OmniPlay WebRTC] setCodecPreferences unsupported or failed:', err);
   }
@@ -330,6 +448,11 @@ export class WatchPartyService {
   private qualityListeners: Set<(quality: MovieQuality) => void> = new Set();
   private statsIntervalId: ReturnType<typeof setInterval> | null = null;
   private bandwidthLimitationSeconds = 0;
+  private cpuLimitationSeconds = 0;
+  private stableSeconds = 0;
+  private adaptiveTier: AdaptiveTier = 'high';
+  private sourceWidth: number = 0;
+  private sourceHeight: number = 0;
   private previousBytesSentMap: Map<string, number> = new Map();
 
   // Guest state
@@ -397,6 +520,37 @@ export class WatchPartyService {
     return this.movieQuality;
   }
 
+  public getAdaptiveTier(): AdaptiveTier {
+    return this.adaptiveTier;
+  }
+
+  public connectToMeshPeer(targetPeerId: string): void {
+    if (!this.peer || this.role !== 'guest') return;
+    if (meshP2PManager.getConnectedPeerCount() >= 3) return;
+    try {
+      const conn = this.peer.connect(targetPeerId, {
+        label: 'movie-mesh-piece',
+        reliable: true,
+      });
+      conn.on('open', () => {
+        meshP2PManager.registerPeerConnection(targetPeerId, conn);
+      });
+    } catch (err) {
+      console.warn('[MeshP2P] Failed to connect to peer:', err);
+    }
+  }
+
+  public setSourceDimensions(width: number, height: number): void {
+    if (width > 0 && height > 0) {
+      const changed = this.sourceWidth !== width || this.sourceHeight !== height;
+      this.sourceWidth = width;
+      this.sourceHeight = height;
+      if (changed && this.role === 'host') {
+        this.reapplyAllSenders();
+      }
+    }
+  }
+
   public onMovieQuality(cb: (quality: MovieQuality) => void): () => void {
     this.qualityListeners.add(cb);
     cb(this.movieQuality);
@@ -405,8 +559,12 @@ export class WatchPartyService {
 
   public notifyCallState(inCall: boolean) {
     this.inCallActive = inCall;
+    this.reapplyAllSenders();
+  }
+
+  private reapplyAllSenders(): void {
     for (const entry of this.moviePeerConnections.values()) {
-      this.applyMovieBitrateForEntry(entry, this.movieQuality, inCall);
+      this.applyMovieBitrateForEntry(entry, this.movieQuality, this.inCallActive);
     }
   }
 
@@ -420,23 +578,15 @@ export class WatchPartyService {
       const senders = pc.getSenders();
       for (const sender of senders) {
         if (sender.track && sender.track.kind === 'video') {
-          const params = sender.getParameters();
-          if (!params.encodings || params.encodings.length === 0) {
-            params.encodings = [{}];
-          }
-          let targetBitrate =
-            quality === '1080p'
-              ? QUALITY_BITRATES['1080p']
-              : quality === '720p'
-              ? QUALITY_BITRATES['720p']
-              : 3_000_000;
-          if (inCall) {
-            targetBitrate = Math.max(500_000, targetBitrate - 400_000);
-          }
-          params.encodings[0].maxBitrate = targetBitrate;
-          params.encodings[0].scaleResolutionDownBy = 1;
-          params.degradationPreference = quality === 'auto' ? 'balanced' : 'maintain-resolution';
-          await sender.setParameters(params);
+          const trackSettings = sender.track.getSettings ? sender.track.getSettings() : undefined;
+          const srcHeight = this.sourceHeight || trackSettings?.height;
+          const config = computeMovieSenderConfig(
+            quality,
+            srcHeight,
+            inCall,
+            this.adaptiveTier
+          );
+          await applyMovieSenderParameters(sender, config);
         }
       }
     } catch (err) {
@@ -447,11 +597,10 @@ export class WatchPartyService {
   public async setMovieQuality(quality: MovieQuality): Promise<void> {
     this.movieQuality = quality;
     this.bandwidthLimitationSeconds = 0;
+    this.cpuLimitationSeconds = 0;
+    this.stableSeconds = 0;
     this.qualityListeners.forEach((cb) => cb(quality));
-
-    for (const [, entry] of this.moviePeerConnections.entries()) {
-      await this.applyMovieBitrateForEntry(entry, quality, this.inCallActive);
-    }
+    this.reapplyAllSenders();
     console.info(`[OmniPlay Stream] Live movie quality updated to: ${quality}`);
   }
 
@@ -470,6 +619,8 @@ export class WatchPartyService {
       if (this.role !== 'host' || this.moviePeerConnections.size === 0) return;
 
       let isAnyPeerBandwidthLimited = false;
+      let isAnyPeerCpuLimited = false;
+      let hasSevereFrameDrops = false;
 
       for (const [peerId, entry] of this.moviePeerConnections.entries()) {
         const pc = entry.pc;
@@ -482,10 +633,26 @@ export class WatchPartyService {
               const bytesSent = report.bytesSent ?? 0;
               const prevBytes = this.previousBytesSentMap.get(peerId) ?? bytesSent;
               this.previousBytesSentMap.set(peerId, bytesSent);
-              const deltaBytes = Math.max(0, bytesSent - prevBytes);
-              const bitrateKbps = Math.round((deltaBytes * 8) / (3 * 1000));
 
               if (report.qualityLimitationReason === 'bandwidth') {
+                isAnyPeerBandwidthLimited = true;
+              } else if (report.qualityLimitationReason === 'cpu') {
+                isAnyPeerCpuLimited = true;
+              }
+
+              // Detect severe outgoing frame drops while video is sending frames
+              if (
+                typeof report.framesPerSecond === 'number' &&
+                report.framesPerSecond > 0 &&
+                report.framesPerSecond < 18
+              ) {
+                hasSevereFrameDrops = true;
+              }
+            }
+
+            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+              // High round trip time (> 450ms) indicates network congestion
+              if (report.currentRoundTripTime && report.currentRoundTripTime > 0.45) {
                 isAnyPeerBandwidthLimited = true;
               }
             }
@@ -493,14 +660,58 @@ export class WatchPartyService {
         } catch {}
       }
 
-      if (isAnyPeerBandwidthLimited) {
-        this.bandwidthLimitationSeconds += 3;
-        if (this.bandwidthLimitationSeconds >= 10) {
+      const isConstrained = isAnyPeerBandwidthLimited || isAnyPeerCpuLimited || hasSevereFrameDrops;
+
+      if (isConstrained) {
+        this.stableSeconds = 0;
+        if (isAnyPeerCpuLimited || hasSevereFrameDrops) {
+          this.cpuLimitationSeconds += 3;
+        }
+        if (isAnyPeerBandwidthLimited) {
+          this.bandwidthLimitationSeconds += 3;
+        }
+
+        // Hysteresis: require at least 6 seconds of sustained constraint before stepping down
+        if (this.cpuLimitationSeconds >= 6 || this.bandwidthLimitationSeconds >= 6) {
+          this.cpuLimitationSeconds = 0;
           this.bandwidthLimitationSeconds = 0;
-          this.stepDownQuality();
+
+          if (this.movieQuality === 'auto') {
+            if (this.adaptiveTier === 'high') {
+              this.adaptiveTier = 'medium';
+              console.info('[OmniPlay Stream] Auto quality adapted: stepped down to medium');
+              this.reapplyAllSenders();
+            } else if (this.adaptiveTier === 'medium') {
+              this.adaptiveTier = 'low';
+              console.info('[OmniPlay Stream] Auto quality adapted: stepped down to low');
+              this.reapplyAllSenders();
+            }
+          } else {
+            // Manual quality preset: step down if severe constraint persists
+            this.stepDownQuality();
+          }
         }
       } else {
+        // Recovery: decrease limitation counters and accumulate stable time
+        this.cpuLimitationSeconds = Math.max(0, this.cpuLimitationSeconds - 3);
         this.bandwidthLimitationSeconds = Math.max(0, this.bandwidthLimitationSeconds - 3);
+        this.stableSeconds += 3;
+
+        // Require 18 seconds of continuous healthy stats before cautiously stepping up
+        if (this.stableSeconds >= 18) {
+          this.stableSeconds = 0;
+          if (this.movieQuality === 'auto') {
+            if (this.adaptiveTier === 'low') {
+              this.adaptiveTier = 'medium';
+              console.info('[OmniPlay Stream] Auto quality adapted: stepped up to medium');
+              this.reapplyAllSenders();
+            } else if (this.adaptiveTier === 'medium') {
+              this.adaptiveTier = 'high';
+              console.info('[OmniPlay Stream] Auto quality adapted: stepped up to high');
+              this.reapplyAllSenders();
+            }
+          }
+        }
       }
     }, 3000);
   }
@@ -512,6 +723,8 @@ export class WatchPartyService {
     }
     this.previousBytesSentMap.clear();
     this.bandwidthLimitationSeconds = 0;
+    this.cpuLimitationSeconds = 0;
+    this.stableSeconds = 0;
   }
 
   private setupMovieConnectionForGuest(peerId: string) {
@@ -527,6 +740,10 @@ export class WatchPartyService {
     const iceServers = getIceServers();
     const pc = new RTCPeerConnection({ iceServers });
     const remoteStream = new MediaStream();
+
+    if (typeof window !== 'undefined') {
+      (window as any).__moviePc = pc;
+    }
 
     const entry = {
       pc,
@@ -549,6 +766,9 @@ export class WatchPartyService {
         console.warn(`[movie] Connection failed with ${peerId}, attempting ICE restart.`);
         try { pc.restartIce(); } catch {}
       } else if (pc.connectionState === 'closed') {
+        if (typeof window !== 'undefined' && (window as any).__moviePc === pc) {
+          (window as any).__moviePc = null;
+        }
         this.moviePeerConnections.delete(peerId);
         if (this.moviePeerConnections.size === 0) {
           this.stopStatsPolling();
@@ -575,6 +795,12 @@ export class WatchPartyService {
     pc.onnegotiationneeded = async () => {
       try {
         entry.makingOffer = true;
+        // Apply codec preferences immediately before local description offer
+        const transceivers = pc.getTransceivers ? pc.getTransceivers() : [];
+        const videoTransceiver = transceivers.find((t) => t.sender.track?.kind === 'video');
+        if (videoTransceiver) {
+          applyCodecPreferences(videoTransceiver);
+        }
         await pc.setLocalDescription();
         if (pc.localDescription) {
           this.sendToPeer(peerId, {
@@ -616,6 +842,11 @@ export class WatchPartyService {
       const iceServers = getIceServers();
       const pc = new RTCPeerConnection({ iceServers });
       const remoteStream = new MediaStream();
+
+      if (typeof window !== 'undefined') {
+        (window as any).__moviePc = pc;
+      }
+
       entry = {
         pc,
         remoteStream,
@@ -637,6 +868,9 @@ export class WatchPartyService {
           console.warn(`[movie] Connection failed with ${senderPeerId}, attempting ICE restart.`);
           try { pc.restartIce(); } catch {}
         } else if (pc.connectionState === 'closed') {
+          if (typeof window !== 'undefined' && (window as any).__moviePc === pc) {
+            (window as any).__moviePc = null;
+          }
           this.moviePeerConnections.delete(senderPeerId);
         }
       };
@@ -676,6 +910,15 @@ export class WatchPartyService {
           }
         }
         if (signal.description.type === 'offer') {
+          // Apply codec preferences on receiver side before creating answer if supported
+          try {
+            const transceivers = pc.getTransceivers ? pc.getTransceivers() : [];
+            const videoTransceiver = transceivers.find((t) => t.receiver?.track?.kind === 'video');
+            if (videoTransceiver) {
+              applyCodecPreferences(videoTransceiver);
+            }
+          } catch {}
+
           await pc.setLocalDescription();
           if (pc.localDescription) {
             this.sendCommand({
@@ -964,6 +1207,8 @@ export class WatchPartyService {
         this.peer.on('connection', (conn: DataConnection) => {
           if (conn.label === 'movie-file-transfer') {
             this.fileTransferConnListeners.forEach((cb) => cb(conn));
+          } else if (conn.label === 'movie-mesh-piece') {
+            meshP2PManager.registerPeerConnection(conn.peer, conn);
           }
         });
 
@@ -1111,7 +1356,12 @@ export class WatchPartyService {
       const audioSender = senders.find((s) => s.track?.kind === 'audio');
 
       if (videoSender && newVideoTrack) {
-        videoSender.replaceTrack(newVideoTrack).catch(() => {});
+        videoSender
+          .replaceTrack(newVideoTrack)
+          .then(() => {
+            this.applyMovieBitrateForEntry(entry, this.movieQuality, this.inCallActive);
+          })
+          .catch(() => {});
       }
       if (audioSender && newAudioTrack) {
         audioSender.replaceTrack(newAudioTrack).catch(() => {});
@@ -1125,6 +1375,9 @@ export class WatchPartyService {
 
   public leave(): void {
     this.stopStatsPolling();
+    if (typeof window !== 'undefined') {
+      (window as any).__moviePc = null;
+    }
     if (this.role === 'host') {
       try {
         this.sendCommand({ type: 'host-closed' });

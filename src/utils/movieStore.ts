@@ -13,6 +13,7 @@ export interface MovieRecord {
   pieceCount: number;
   duration?: number;
   receivedPieces: number[];
+  pieceHashes?: Record<number, string>;
   complete: boolean;
   lastUsed: number;
   storageBackend: 'opfs' | 'idb';
@@ -223,7 +224,8 @@ export class MovieStore {
   public async writePiece(
     fingerprint: string,
     pieceIndex: number,
-    pieceBuffer: ArrayBuffer
+    pieceBuffer: ArrayBuffer,
+    pieceHash?: string
   ): Promise<boolean> {
     const record = await this.getMovie(fingerprint);
     if (!record) return false;
@@ -262,6 +264,10 @@ export class MovieStore {
           const set = new Set(record.receivedPieces);
           set.add(pieceIndex);
           record.receivedPieces = Array.from(set).sort((a, b) => a - b);
+          if (pieceHash) {
+            record.pieceHashes = record.pieceHashes || {};
+            record.pieceHashes[pieceIndex] = pieceHash;
+          }
           await this.saveMovieRecord(record);
           return true;
         }
@@ -285,6 +291,10 @@ export class MovieStore {
       const set = new Set(record.receivedPieces);
       set.add(pieceIndex);
       record.receivedPieces = Array.from(set).sort((a, b) => a - b);
+      if (pieceHash) {
+        record.pieceHashes = record.pieceHashes || {};
+        record.pieceHashes[pieceIndex] = pieceHash;
+      }
       await this.saveMovieRecord(record);
       return true;
     } catch (err) {
@@ -295,7 +305,7 @@ export class MovieStore {
 
   public async markComplete(fingerprint: string): Promise<void> {
     const record = await this.getMovie(fingerprint);
-    if (!record) return;
+    if (!record || record.complete) return;
 
     record.complete = true;
     record.lastUsed = Date.now();
@@ -316,30 +326,61 @@ export class MovieStore {
     await this.saveMovieRecord(record);
   }
 
-  public async getMovieFile(fingerprint: string): Promise<File | null> {
-    const record = await this.getMovie(fingerprint);
-    if (!record || !record.complete) return null;
+  public async validateStoredMovie(fingerprint: string): Promise<{
+    valid: boolean;
+    record: MovieRecord | null;
+    file: File | null;
+  }> {
+    if (!fingerprint) {
+      return { valid: false, record: null, file: null };
+    }
 
+    const record = await this.getMovie(fingerprint);
+    if (!record) {
+      return { valid: false, record: null, file: null };
+    }
+
+    const expectedPieceCount = record.size === 0 ? 0 : Math.ceil(record.size / record.pieceSize);
+
+    // Verify metadata integrity
+    if (!record.complete || record.receivedPieces.length < expectedPieceCount) {
+      return { valid: false, record, file: null };
+    }
+
+    // OPFS validation: check actual disk file existence and exact byte length
     if (record.storageBackend === 'opfs') {
       try {
         const root = await navigator.storage.getDirectory();
         const dir = await root.getDirectoryHandle('omniplay_movies', { create: false });
         const fileHandle = await dir.getFileHandle(`${fingerprint}.bin`, { create: false });
         const diskFile = await fileHandle.getFile();
-        return new File([diskFile], record.name, {
+
+        if (diskFile.size !== record.size) {
+          console.warn(`[movieStore] OPFS size mismatch for ${fingerprint}: ${diskFile.size} vs ${record.size}`);
+          record.complete = false;
+          await this.saveMovieRecord(record);
+          return { valid: false, record, file: null };
+        }
+
+        const file = new File([diskFile], record.name, {
           type: record.type || 'video/mp4',
           lastModified: record.lastUsed,
         });
+        return { valid: true, record, file };
       } catch (err) {
-        console.warn('[movieStore] Failed to read OPFS file directly, falling back:', err);
+        console.warn(`[movieStore] OPFS file unreadable for ${fingerprint}:`, err);
+        record.complete = false;
+        await this.saveMovieRecord(record);
+        return { valid: false, record, file: null };
       }
     }
 
-    // IDB Assembly fallback
+    // IDB validation: verify all pieces exist in chunk store
     try {
       const db = await getDB();
       const chunks: ArrayBuffer[] = [];
-      for (let i = 0; i < record.pieceCount; i++) {
+
+      for (let i = 0; i < expectedPieceCount; i++) {
         const chunk = await new Promise<ArrayBuffer | null>((resolve) => {
           const tx = db.transaction(CHUNKS_STORE, 'readonly');
           const store = tx.objectStore(CHUNKS_STORE);
@@ -347,20 +388,88 @@ export class MovieStore {
           req.onsuccess = () => resolve(req.result || null);
           req.onerror = () => resolve(null);
         });
-        if (chunk) {
-          chunks.push(chunk);
-        } else {
-          return null; // Missing piece
+
+        if (!chunk || !(chunk instanceof ArrayBuffer) || chunk.byteLength === 0) {
+          console.warn(`[movieStore] IDB chunk ${i} missing for ${fingerprint}`);
+          record.complete = false;
+          await this.saveMovieRecord(record);
+          return { valid: false, record, file: null };
         }
+        chunks.push(chunk);
       }
-      return new File(chunks, record.name, {
+
+      const file = new File(chunks, record.name, {
         type: record.type || 'video/mp4',
         lastModified: record.lastUsed,
       });
+      return { valid: true, record, file };
     } catch (err) {
-      console.error('[movieStore] Failed to assemble movie from IDB:', err);
-      return null;
+      console.warn(`[movieStore] IDB chunk validation failed for ${fingerprint}:`, err);
+      record.complete = false;
+      await this.saveMovieRecord(record);
+      return { valid: false, record, file: null };
     }
+  }
+
+  public async isMovieCompleteAndValid(fingerprint: string): Promise<boolean> {
+    const res = await this.validateStoredMovie(fingerprint);
+    return res.valid;
+  }
+
+  public async verifyStoredPieces(fingerprint: string): Promise<number[]> {
+    const record = await this.getMovie(fingerprint);
+    if (!record) return [];
+
+    const verified: number[] = [];
+
+    if (record.storageBackend === 'opfs') {
+      try {
+        const root = await navigator.storage.getDirectory();
+        const dir = await root.getDirectoryHandle('omniplay_movies', { create: false });
+        const fileHandle = await dir.getFileHandle(`${fingerprint}.bin`, { create: false });
+        const diskFile = await fileHandle.getFile();
+
+        for (const idx of record.receivedPieces) {
+          const requiredEnd = Math.min(record.size, (idx + 1) * record.pieceSize);
+          if (diskFile.size >= requiredEnd) {
+            verified.push(idx);
+          }
+        }
+      } catch {
+        return [];
+      }
+    } else {
+      try {
+        const db = await getDB();
+        for (const idx of record.receivedPieces) {
+          const exists = await new Promise<boolean>((resolve) => {
+            const tx = db.transaction(CHUNKS_STORE, 'readonly');
+            const store = tx.objectStore(CHUNKS_STORE);
+            const req = store.get(`${fingerprint}_${idx}`);
+            req.onsuccess = () => resolve(!!req.result);
+            req.onerror = () => resolve(false);
+          });
+          if (exists) {
+            verified.push(idx);
+          }
+        }
+      } catch {
+        return [];
+      }
+    }
+
+    if (verified.length !== record.receivedPieces.length) {
+      record.receivedPieces = verified;
+      record.complete = false;
+      await this.saveMovieRecord(record);
+    }
+
+    return verified;
+  }
+
+  public async getMovieFile(fingerprint: string): Promise<File | null> {
+    const res = await this.validateStoredMovie(fingerprint);
+    return res.valid ? res.file : null;
   }
 
   public async deleteMovie(fingerprint: string): Promise<void> {

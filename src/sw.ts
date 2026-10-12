@@ -1,8 +1,14 @@
-/**
- * OmniPlay Movie Service Worker
- * Serves partial movie files to HTML5 <video> elements via HTTP 206 Range requests
- * streaming byte-by-byte / piece-by-piece from OPFS (or IndexedDB).
- */
+/// <reference lib="webworker" />
+import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching';
+
+declare const self: any;
+
+// Clean up outdated caches and precache PWA assets injected by VitePWA
+cleanupOutdatedCaches();
+precacheAndRoute(self.__WB_MANIFEST || []);
+
+self.skipWaiting();
+self.clients.claim();
 
 const PREFIX = '/__omniplay_movie/';
 const DB_NAME = 'omniplay_movie_storage';
@@ -10,18 +16,9 @@ const DB_VERSION = 1;
 const META_STORE = 'metadata';
 const CHUNKS_STORE = 'chunks';
 
-self.addEventListener('install', (event) => {
-  self.skipWaiting();
-});
+const pendingPieceResolvers = new Map<string, Array<() => void>>();
 
-self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
-});
-
-// Broadcast / listener for piece-stored notification
-const pendingPieceResolvers = new Map();
-
-self.addEventListener('message', (event) => {
+self.addEventListener('message', (event: any) => {
   const data = event.data;
   if (!data) return;
 
@@ -32,14 +29,22 @@ self.addEventListener('message', (event) => {
       resolvers.forEach((resolve) => resolve());
       pendingPieceResolvers.delete(key);
     }
+  } else if (data.type === 'abort-playback') {
+    // Release pending resolvers when playback or room closes
+    pendingPieceResolvers.clear();
   }
 });
 
-function waitForPieceStored(fingerprint, index, timeoutMs = 60000) {
+function waitForPieceStored(fingerprint: string, index: number, timeoutMs = 30000): Promise<void> {
   const key = `${fingerprint}_${index}`;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      // Clean up resolver
+    let timer: any;
+    const onStored = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+
+    timer = setTimeout(() => {
       const arr = pendingPieceResolvers.get(key) || [];
       const idx = arr.indexOf(onStored);
       if (idx !== -1) arr.splice(idx, 1);
@@ -47,26 +52,24 @@ function waitForPieceStored(fingerprint, index, timeoutMs = 60000) {
       reject(new Error(`Timed out waiting for piece ${index} of ${fingerprint}`));
     }, timeoutMs);
 
-    const onStored = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-
     const arr = pendingPieceResolvers.get(key) || [];
     arr.push(onStored);
     pendingPieceResolvers.set(key, arr);
   });
 }
 
-function openDB() {
+function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') {
+      return reject(new Error('IndexedDB unavailable in ServiceWorker'));
+    }
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
 
-async function getMovieRecord(fingerprint) {
+async function getMovieRecord(fingerprint: string): Promise<any | null> {
   try {
     const db = await openDB();
     return new Promise((resolve) => {
@@ -76,12 +79,12 @@ async function getMovieRecord(fingerprint) {
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
-  } catch (err) {
+  } catch {
     return null;
   }
 }
 
-async function readPieceFromStore(record, index) {
+async function readPieceFromStore(record: any, index: number): Promise<ArrayBuffer | null> {
   const fingerprint = record.fingerprint;
   const pieceSize = record.pieceSize || 1024 * 1024;
   const offset = index * pieceSize;
@@ -98,8 +101,8 @@ async function readPieceFromStore(record, index) {
       if (buf.byteLength > 0) {
         return buf;
       }
-    } catch (e) {
-      // Fallback to IDB chunks if file access error
+    } catch {
+      // Fallback to IDB chunks if OPFS access fails
     }
   }
 
@@ -113,14 +116,13 @@ async function readPieceFromStore(record, index) {
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
-  } catch (err) {
+  } catch {
     return null;
   }
 }
 
-// Request priority piece from connected clients (pages)
-function notifyPagePriorityNeeded(fingerprint, pieceIndex) {
-  self.clients.matchAll({ type: 'window' }).then((clients) => {
+function notifyPagePriorityNeeded(fingerprint: string, pieceIndex: number) {
+  self.clients.matchAll({ type: 'window' }).then((clients: any[]) => {
     clients.forEach((client) => {
       client.postMessage({
         type: 'priority-piece-needed',
@@ -131,29 +133,34 @@ function notifyPagePriorityNeeded(fingerprint, pieceIndex) {
   });
 }
 
-// Check if piece is in record.receivedPieces
-function isPieceStored(record, index) {
+function isPieceStored(record: any, index: number): boolean {
   if (!record || !record.receivedPieces) return false;
   return record.receivedPieces.includes(index);
 }
 
-self.addEventListener('fetch', (event) => {
+self.addEventListener('fetch', (event: any) => {
   const url = new URL(event.request.url);
 
   // Same-origin only, prefix /__omniplay_movie/<fingerprint>.<ext>
   if (url.origin !== self.location.origin) return;
   if (!url.pathname.startsWith(PREFIX)) return;
-  if (event.request.method !== 'GET') return;
+  if (event.request.method !== 'GET' && event.request.method !== 'HEAD') return;
 
   const rest = url.pathname.slice(PREFIX.length);
   const dotIndex = rest.lastIndexOf('.');
   const fingerprint = dotIndex !== -1 ? rest.slice(0, dotIndex) : rest;
   const ext = dotIndex !== -1 ? rest.slice(dotIndex + 1).toLowerCase() : '';
 
+  // Validate fingerprint format (64 hex characters)
+  if (!/^[0-9a-f]{64}$/i.test(fingerprint)) {
+    event.respondWith(new Response('Invalid movie fingerprint', { status: 400 }));
+    return;
+  }
+
   event.respondWith(handleMovieRangeRequest(event.request, fingerprint, ext));
 });
 
-async function handleMovieRangeRequest(request, fingerprint, ext) {
+async function handleMovieRangeRequest(request: Request, fingerprint: string, ext: string): Promise<Response> {
   const record = await getMovieRecord(fingerprint);
   if (!record) {
     return new Response('Movie not found in local store', { status: 404 });
@@ -169,33 +176,75 @@ async function handleMovieRangeRequest(request, fingerprint, ext) {
     else mimeType = 'video/mp4';
   }
 
-  const rangeHeader = request.headers.get('range');
+  // Handle empty files (0 bytes)
+  if (totalSize === 0) {
+    return new Response(new Uint8Array(0), {
+      status: 200,
+      headers: {
+        'Accept-Ranges': 'bytes',
+        'Content-Type': mimeType,
+        'Content-Length': '0',
+      },
+    });
+  }
 
+  const rangeHeader = request.headers.get('range');
   let start = 0;
   let end = totalSize - 1;
   let isRange = false;
 
   if (rangeHeader) {
-    const matches = /bytes=(\d+)-(\d+)?/.exec(rangeHeader);
+    // Parse range: bytes=start-end, bytes=start-, bytes=-suffix
+    const matches = /bytes=(\d*)-(\d*)/.exec(rangeHeader);
     if (matches) {
       isRange = true;
-      start = parseInt(matches[1], 10);
-      if (matches[2]) {
-        end = parseInt(matches[2], 10);
+      const startStr = matches[1];
+      const endStr = matches[2];
+
+      if (startStr && endStr) {
+        start = parseInt(startStr, 10);
+        end = parseInt(endStr, 10);
+      } else if (startStr) {
+        start = parseInt(startStr, 10);
+        end = totalSize - 1;
+      } else if (endStr) {
+        const suffixLength = parseInt(endStr, 10);
+        start = Math.max(0, totalSize - suffixLength);
+        end = totalSize - 1;
       }
     }
   }
 
-  if (start >= totalSize || end >= totalSize || start > end) {
+  // Check 416 Range Not Satisfiable
+  if (start >= totalSize || end >= totalSize || start > end || start < 0) {
     return new Response(null, {
       status: 416,
+      statusText: 'Range Not Satisfiable',
       headers: {
         'Content-Range': `bytes */${totalSize}`,
+        'Accept-Ranges': 'bytes',
       },
     });
   }
 
   const contentLength = end - start + 1;
+
+  // HEAD request returns headers only
+  if (request.method === 'HEAD') {
+    const headers: Record<string, string> = {
+      'Accept-Ranges': 'bytes',
+      'Content-Type': mimeType,
+      'Content-Length': String(contentLength),
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+    };
+    if (isRange) {
+      headers['Content-Range'] = `bytes ${start}-${end}/${totalSize}`;
+    }
+    return new Response(null, {
+      status: isRange ? 206 : 200,
+      headers,
+    });
+  }
 
   // Stream body piece by piece using ReadableStream
   const stream = new ReadableStream({
@@ -207,23 +256,21 @@ async function handleMovieRangeRequest(request, fingerprint, ext) {
           const pieceIndex = Math.floor(currentOffset / pieceSize);
           const pieceByteStart = pieceIndex * pieceSize;
 
-          // Check if piece is stored
           let freshRecord = await getMovieRecord(fingerprint);
           let stored = isPieceStored(freshRecord, pieceIndex);
 
           if (!stored) {
-            // Notify active windows to request this piece from the host as priority
+            // Request missing piece with bounded wait
             notifyPagePriorityNeeded(fingerprint, pieceIndex);
 
-            // Wait for piece to arrive (up to 60s, checking every 250ms and via event)
             const startTime = Date.now();
-            while (!stored && Date.now() - startTime < 60000) {
+            while (!stored && Date.now() - startTime < 30000) {
               try {
                 await Promise.race([
                   waitForPieceStored(fingerprint, pieceIndex, 500),
                   new Promise((r) => setTimeout(r, 250)),
                 ]);
-              } catch (e) {}
+              } catch {}
 
               freshRecord = await getMovieRecord(fingerprint);
               stored = isPieceStored(freshRecord, pieceIndex);
@@ -237,7 +284,6 @@ async function handleMovieRangeRequest(request, fingerprint, ext) {
             }
           }
 
-          // Piece is stored: read from disk/IDB
           const pieceBuf = await readPieceFromStore(freshRecord || record, pieceIndex);
           if (!pieceBuf) {
             controller.error(new Error(`Failed to read piece ${pieceIndex} from store`));
@@ -266,7 +312,7 @@ async function handleMovieRangeRequest(request, fingerprint, ext) {
     },
   });
 
-  const headers = {
+  const headers: Record<string, string> = {
     'Accept-Ranges': 'bytes',
     'Content-Type': mimeType,
     'Content-Length': String(contentLength),
