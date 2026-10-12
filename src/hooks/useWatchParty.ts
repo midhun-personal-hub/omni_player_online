@@ -16,10 +16,8 @@ import {
   CallQuality,
   CallDevices,
 } from '../utils/callManager';
-import { fileTransferManager, TransferProgress } from '../utils/fileTransfer';
-import { movieStore } from '../utils/movieStore';
 
-export interface HostMediaState {
+interface HostMediaState {
   isPlaying: boolean;
   currentTime: number;
   duration: number;
@@ -27,7 +25,6 @@ export interface HostMediaState {
   mediaName: string;
   isAudio: boolean;
   allowGuestControl: boolean;
-  sentAt?: number;
 }
 
 function sanitizeChatText(raw: unknown): string {
@@ -175,35 +172,6 @@ export function useWatchParty(options?: {
     name: string;
   } | null>(null);
 
-  // File Transfer State
-  const [transferProgress, setTransferProgress] = useState<TransferProgress | null>(null);
-  const [isLocalPlayback, setIsLocalPlayback] = useState<boolean>(false);
-  const [localVideoUrl, setLocalVideoUrl] = useState<string | null>(null);
-  const bufferingTimeoutRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    fileTransferManager.setToastListener((msg) => onToast?.(msg));
-    const unsubProgress = fileTransferManager.onProgress((p) => {
-      setTransferProgress(p ? { ...p } : null);
-    });
-    const unsubLocal = fileTransferManager.onLocalMode((isLocal, objectUrl) => {
-      setIsLocalPlayback(isLocal);
-      setLocalVideoUrl(objectUrl || null);
-    });
-    const unsubConn = watchPartyService.onFileTransferConnection((conn) => {
-      fileTransferManager.handleIncomingConnection(
-        conn,
-        roleRef.current === 'host' || watchPartyService.getRole() === 'host'
-      );
-    });
-
-    return () => {
-      unsubProgress();
-      unsubLocal();
-      unsubConn();
-    };
-  }, [onToast]);
-
   const callManagerRef = useRef<CallManager | null>(null);
   const inCallRef = useRef<boolean>(false);
 
@@ -237,7 +205,6 @@ export function useWatchParty(options?: {
         inCallRef.current = active;
         setInCall(active);
         if (active) setIncomingCall(null);
-        watchPartyService.notifyCallState(active);
       },
       onMediaStateChange: (cam, mic) => {
         setCamEnabled(cam);
@@ -260,17 +227,20 @@ export function useWatchParty(options?: {
         const hostPeerId = getHostPeerId();
         const myPeerId = watchPartyService.getMyPeerId() || (isHost ? hostPeerId : undefined);
         const resolvedTargetId = targetPeerId === 'host' ? hostPeerId : targetPeerId;
-        const msg = {
-          type: 'party-signal' as const,
-          kind: 'call' as const,
-          senderId: myPeerId || hostPeerId,
-          targetId: resolvedTargetId,
-          signal,
-        };
         if (isHost) {
-          watchPartyService.sendToPeer(resolvedTargetId, msg);
+          watchPartyService.sendToPeer(resolvedTargetId, {
+            type: 'call-signal',
+            senderId: myPeerId || hostPeerId,
+            targetId: resolvedTargetId,
+            signal,
+          });
         } else {
-          watchPartyService.sendCommand(msg);
+          watchPartyService.sendCommand({
+            type: 'call-signal',
+            senderId: myPeerId,
+            targetId: resolvedTargetId,
+            signal,
+          });
         }
       },
     });
@@ -297,25 +267,6 @@ export function useWatchParty(options?: {
   useEffect(() => {
     const unsubRoster = watchPartyService.onRoster((peers) => {
       callManagerRef.current?.setRoster(peers);
-
-      // Phase 3C: Mesh P2P piece sharing between guests (only when 2+ guests)
-      const myPeerId = watchPartyService.getMyPeerId();
-      const currentRole = watchPartyService.getRole();
-      if (currentRole === 'guest' && myPeerId) {
-        // Find other guests (excluding host and self)
-        const otherGuests = peers.filter(
-          (p) => p.id !== 'host' && p.id !== myPeerId && !p.id.startsWith('OMNI-')
-        );
-        // Only when there are 2+ guests total (self + at least one other guest)
-        if (otherGuests.length >= 1) {
-          otherGuests.forEach((g) => {
-            // Deterministic initiator to avoid duplicate symmetric connections
-            if (myPeerId < g.id) {
-              watchPartyService.connectToMeshPeer(g.id);
-            }
-          });
-        }
-      }
     });
     return () => {
       unsubRoster();
@@ -355,7 +306,6 @@ export function useWatchParty(options?: {
       mediaName: mediaTitle,
       isAudio: !!isAudio,
       allowGuestControl: allowGuestControlRef.current,
-      sentAt: Date.now(),
     };
     watchPartyService.sendCommand({
       type: 'state',
@@ -451,27 +401,11 @@ export function useWatchParty(options?: {
         mediaEl.srcObject = null;
       }
 
-      let captured: MediaStream | null = null;
-      try {
-        if (typeof (mediaEl as any).captureStream === 'function') {
-          captured = (mediaEl as any).captureStream(30);
-        } else if (typeof (mediaEl as any).mozCaptureStream === 'function') {
-          captured = (mediaEl as any).mozCaptureStream(30);
-        }
-      } catch (err) {
-        console.warn('[OmniPlay Host] captureStream(30) fallback:', err);
-        try {
-          if (typeof (mediaEl as any).captureStream === 'function') {
-            captured = (mediaEl as any).captureStream();
-          }
-        } catch {}
-      }
-
-      // Propagate source video resolution to watchPartyService for scaleResolutionDownBy calculation
-      const videoEl = el as HTMLVideoElement;
-      if (videoEl.videoWidth && videoEl.videoHeight) {
-        watchPartyService.setSourceDimensions(videoEl.videoWidth, videoEl.videoHeight);
-      }
+      const captured: MediaStream | null = mediaEl.captureStream
+        ? mediaEl.captureStream()
+        : mediaEl.mozCaptureStream
+        ? mediaEl.mozCaptureStream()
+        : null;
 
       const audioTrack = audioEngine.getCaptureAudioTrack();
       const combined = new MediaStream();
@@ -503,24 +437,7 @@ export function useWatchParty(options?: {
 
   useEffect(() => {
     updateCapturedStream();
-
-    const el = getMediaElement();
-    if (!el || role !== 'host') return;
-
-    const handleMeta = () => {
-      const v = el as HTMLVideoElement;
-      if (v.videoWidth && v.videoHeight) {
-        watchPartyService.setSourceDimensions(v.videoWidth, v.videoHeight);
-      }
-    };
-
-    el.addEventListener('loadedmetadata', handleMeta);
-    el.addEventListener('resize', handleMeta);
-    return () => {
-      el.removeEventListener('loadedmetadata', handleMeta);
-      el.removeEventListener('resize', handleMeta);
-    };
-  }, [updateCapturedStream, currentMediaUrl, getMediaElement, role]);
+  }, [updateCapturedStream, currentMediaUrl]);
 
   // Host: Heartbeat interval (every 2 seconds)
   useEffect(() => {
@@ -532,7 +449,6 @@ export function useWatchParty(options?: {
         watchPartyService.sendCommand({
           type: 'heartbeat',
           timestamp: Date.now(),
-          sentAt: Date.now(),
           isPlaying: el ? !el.paused : false,
           currentTime: el ? el.currentTime : 0,
           duration: el ? (Number.isFinite(el.duration) ? el.duration : 0) : 0,
@@ -576,34 +492,7 @@ export function useWatchParty(options?: {
           mediaName: cmd.mediaName,
           isAudio: cmd.isAudio,
           allowGuestControl: cmd.allowGuestControl,
-          sentAt: cmd.sentAt || cmd.timestamp || Date.now(),
         });
-      } else if (cmd.type === 'guest-buffering') {
-        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
-          const el = getMediaElement();
-          if (el && !el.paused) {
-            el.pause();
-            broadcastCurrentState();
-            onToast?.(`Waiting for ${cmd.name}...`);
-            if (bufferingTimeoutRef.current) clearTimeout(bufferingTimeoutRef.current);
-            bufferingTimeoutRef.current = window.setTimeout(() => {
-              const mediaEl = getMediaElement();
-              if (mediaEl && mediaEl.paused) {
-                mediaEl.play().catch(console.warn);
-                broadcastCurrentState();
-              }
-            }, 30000);
-          }
-        }
-      } else if (cmd.type === 'guest-ready') {
-        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
-          if (bufferingTimeoutRef.current) clearTimeout(bufferingTimeoutRef.current);
-          const el = getMediaElement();
-          if (el && el.paused) {
-            el.play().catch(console.warn);
-            broadcastCurrentState();
-          }
-        }
       } else if (cmd.type === 'request-state') {
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
           broadcastCurrentState();
@@ -821,31 +710,18 @@ export function useWatchParty(options?: {
         const hostPeerId = getHostPeerId();
         const peerId = cmd.peerId === 'host' ? hostPeerId : cmd.peerId;
         callManagerRef.current?.handleStreamOwner(cmd.streamId, peerId, cmd.name);
-      } else if (cmd.type === 'call-signal' || cmd.type === 'party-signal') {
+      } else if (cmd.type === 'call-signal') {
         const hostPeerId = getHostPeerId();
         const rawSenderId = cmd.senderId || senderPeerId;
         const senderId = rawSenderId === 'host' || !rawSenderId ? hostPeerId : rawSenderId;
-        const kind = (cmd as any).kind || 'movie';
-        if (kind === 'call') {
-          if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
-            if (cmd.targetId && cmd.targetId !== watchPartyService.getMyPeerId()) {
-              watchPartyService.sendToPeer(cmd.targetId, cmd);
-            } else {
-              callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal);
-            }
+        if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
+          if (cmd.targetId && cmd.targetId !== watchPartyService.getMyPeerId()) {
+            watchPartyService.sendToPeer(cmd.targetId, cmd);
           } else {
             callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal);
           }
         } else {
-          if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
-            if (cmd.targetId && cmd.targetId !== watchPartyService.getMyPeerId()) {
-              watchPartyService.sendToPeer(cmd.targetId, cmd);
-            } else {
-              watchPartyService.handleIncomingMovieSignal(senderId, cmd.signal);
-            }
-          } else {
-            watchPartyService.handleIncomingMovieSignal(senderId, cmd.signal);
-          }
+          callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal);
         }
       }
     });
@@ -928,10 +804,6 @@ export function useWatchParty(options?: {
     messagesRef.current = [];
     setUnreadCount(0);
     callManagerRef.current?.setPeerInfo(watchPartyService.getMyPeerId(), chosenName, true);
-    try {
-      sessionStorage.setItem('omniplay-rejoin-room', code.toUpperCase());
-      sessionStorage.setItem('omniplay-rejoin-name', chosenName);
-    } catch {}
   };
 
   const leaveRoom = () => {
@@ -943,19 +815,6 @@ export function useWatchParty(options?: {
     setRemoteStreams(new Map());
     setHostStutterWarning(false);
     setVolumeDuckingMultiplier(1.0);
-
-    try {
-      sessionStorage.removeItem('omniplay-rejoin-room');
-      sessionStorage.removeItem('omniplay-rejoin-name');
-      if (localStorage.getItem('omniplay-delete-on-leave') === 'true') {
-        movieStore.clearAllMovies();
-      }
-    } catch {}
-
-    fileTransferManager.cleanup();
-    setIsLocalPlayback(false);
-    setLocalVideoUrl(null);
-    setTransferProgress(null);
 
     watchPartyService.leave();
     setRole(null);
@@ -1167,86 +1026,6 @@ export function useWatchParty(options?: {
     };
   }, []);
 
-  const [pausePlaybackWhileSendingState, setPausePlaybackWhileSendingState] = useState<boolean>(() => {
-    return fileTransferManager.getPausePlaybackWhileSending();
-  });
-  const [isPreparingTransfer, setIsPreparingTransfer] = useState<boolean>(false);
-  const [hashingProgress, setHashingProgress] = useState<{ current: number; total: number } | null>(null);
-
-  const setPausePlaybackWhileSending = useCallback((val: boolean) => {
-    fileTransferManager.setPausePlaybackWhileSending(val);
-    setPausePlaybackWhileSendingState(val);
-  }, []);
-
-  const startFileTransfer = useCallback(
-    async (file: File) => {
-      const guestIds = watchPartyService.getGuestPeerIds();
-      const peer = watchPartyService.getPeer();
-      const el = getMediaElement();
-      if (fileTransferManager.getPausePlaybackWhileSending() && el && !el.paused) {
-        el.pause();
-        broadcastCurrentState();
-      }
-      setIsPreparingTransfer(true);
-      setHashingProgress({ current: 0, total: Math.ceil(file.size / 1048576) });
-      try {
-        await fileTransferManager.startHostFileTransfer(
-          file,
-          guestIds,
-          peer,
-          el?.duration,
-          (prog) => setHashingProgress(prog)
-        );
-      } catch (err) {
-        console.error('[WatchParty] Failed to start file transfer:', err);
-        throw err;
-      } finally {
-        setIsPreparingTransfer(false);
-        setHashingProgress(null);
-      }
-    },
-    [getMediaElement, broadcastCurrentState]
-  );
-
-  const pauseFileTransfer = useCallback((peerId?: string) => {
-    fileTransferManager.pauseHostTransfer(peerId);
-  }, []);
-
-  const resumeFileTransfer = useCallback((peerId?: string) => {
-    fileTransferManager.resumeHostTransfer(peerId);
-  }, []);
-
-  const cancelFileTransfer = useCallback((peerId?: string) => {
-    fileTransferManager.cancelHostTransfer(peerId);
-  }, []);
-
-  const cancelGuestDownload = useCallback(() => {
-    fileTransferManager.cancelGuestDownload();
-  }, []);
-
-  const revertToLiveStream = useCallback(() => {
-    fileTransferManager.revertToLiveStream();
-    setIsLocalPlayback(false);
-    setLocalVideoUrl(null);
-  }, []);
-
-  const activateProgressivePlayback = useCallback((streamUrl: string) => {
-    fileTransferManager.activateProgressiveMode(streamUrl);
-    setIsLocalPlayback(true);
-    setLocalVideoUrl(streamUrl);
-  }, []);
-
-  const sendBuffering = useCallback(
-    (isBuffering: boolean) => {
-      const myName = getSavedDisplayName() || 'Guest';
-      watchPartyService.sendCommand({
-        type: isBuffering ? 'guest-buffering' : 'guest-ready',
-        name: myName,
-      });
-    },
-    [getSavedDisplayName]
-  );
-
   return {
     role,
     roomCode,
@@ -1307,21 +1086,5 @@ export function useWatchParty(options?: {
     // Movie Stream Quality additions
     movieQuality,
     setMovieQuality,
-    // File Transfer additions
-    transferProgress,
-    isLocalPlayback,
-    localVideoUrl,
-    startFileTransfer,
-    pauseFileTransfer,
-    resumeFileTransfer,
-    cancelFileTransfer,
-    cancelGuestDownload,
-    revertToLiveStream,
-    activateProgressivePlayback,
-    sendBuffering,
-    pausePlaybackWhileSending: pausePlaybackWhileSendingState,
-    setPausePlaybackWhileSending,
-    isPreparingTransfer,
-    hashingProgress,
   };
 }

@@ -46,7 +46,6 @@ import { CallStrip } from './components/CallStrip';
 import { RoomControls } from './components/RoomControls';
 import { AppNotifications } from './components/AppNotifications';
 import { useWatchParty } from './hooks/useWatchParty';
-import { DebugOverlay } from './components/DebugOverlay';
 
 export default function App() {
   const [playlist, setPlaylist] = useState<MediaItem[]>([]);
@@ -302,19 +301,6 @@ export default function App() {
     dismissIncomingCall: watchDismissIncomingCall,
     movieQuality: watchMovieQuality,
     setMovieQuality: watchSetMovieQuality,
-    transferProgress: watchTransferProgress,
-    isLocalPlayback: watchIsLocalPlayback,
-    localVideoUrl: watchLocalVideoUrl,
-    startFileTransfer: watchStartFileTransfer,
-    pauseFileTransfer: watchPauseFileTransfer,
-    resumeFileTransfer: watchResumeFileTransfer,
-    cancelFileTransfer: watchCancelFileTransfer,
-    cancelGuestDownload: watchCancelGuestDownload,
-    revertToLiveStream: watchRevertToLiveStream,
-    activateProgressivePlayback: watchActivateProgressivePlayback,
-    sendBuffering: watchSendBuffering,
-    pausePlaybackWhileSending: watchPausePlaybackWhileSending,
-    setPausePlaybackWhileSending: setWatchPausePlaybackWhileSending,
   } = useWatchParty({
     mediaElement: activeMediaElement,
     currentMediaUrl: currentMedia?.url,
@@ -323,21 +309,6 @@ export default function App() {
     activeSubtitleTrack,
     onToast: showAppToast,
   });
-
-  // Auto-rejoin on refresh (guest)
-  useEffect(() => {
-    try {
-      const rejoinRoom = sessionStorage.getItem('omniplay-rejoin-room');
-      const rejoinName = sessionStorage.getItem('omniplay-rejoin-name');
-      if (rejoinRoom && watchRole === null) {
-        watchJoinRoom(rejoinRoom, rejoinName || undefined).catch((err) => {
-          console.warn('[OmniPlay] Auto-rejoin error:', err);
-          sessionStorage.removeItem('omniplay-rejoin-room');
-          sessionStorage.removeItem('omniplay-rejoin-name');
-        });
-      }
-    } catch {}
-  }, []);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isFullscreenChatInputOpen, setIsFullscreenChatInputOpen] = useState(false);
@@ -828,13 +799,6 @@ export default function App() {
             onStartCall={watchStartCall}
             duckingMultiplier={watchVolumeDuckingMultiplier}
             callStrip={callStripElement}
-            isLocalPlayback={watchIsLocalPlayback}
-            localVideoUrl={watchLocalVideoUrl}
-            transferProgress={watchTransferProgress}
-            onCancelDownload={watchCancelGuestDownload}
-            onRevertToLiveStream={watchRevertToLiveStream}
-            onActivateProgressivePlayback={watchActivateProgressivePlayback}
-            onSendBuffering={watchSendBuffering}
           />
         ) : playlist.length === 0 || !currentMedia ? (
           <EmptyState
@@ -954,17 +918,6 @@ export default function App() {
         onRename={watchRename}
         movieQuality={watchMovieQuality}
         onChangeMovieQuality={watchSetMovieQuality}
-        currentMediaFile={currentMedia?.file}
-        transferProgress={watchTransferProgress}
-        onStartFileTransfer={watchStartFileTransfer}
-        onPauseFileTransfer={watchPauseFileTransfer}
-        onResumeFileTransfer={watchResumeFileTransfer}
-        onCancelFileTransfer={watchCancelFileTransfer}
-        pausePlaybackWhileSending={watchPausePlaybackWhileSending}
-        onTogglePausePlaybackWhileSending={setWatchPausePlaybackWhileSending}
-        onPlayDownloadedMovie={(file: File) => {
-          handleAddFiles([file]);
-        }}
       />
 
       {/* Real-time Watch Together Room Chat Drawer */}
@@ -1032,7 +985,6 @@ export default function App() {
           <span>{appToast}</span>
         </div>
       )}
-      <DebugOverlay />
     </div>
   );
 }

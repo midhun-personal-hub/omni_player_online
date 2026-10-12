@@ -124,18 +124,7 @@ export type WatchPartyCommand =
       streamId: string;
       peerId: string;
       name: string;
-    }
-  | { type: 'manifest'; fingerprint: string; name: string; size: number; type: string; duration: number; pieceSize: number; pieceCount: number; pieceHashes: string[] }
-  | { type: 'have'; fingerprint: string; bitmap: boolean[] }
-  | { type: 'have-all'; fingerprint: string }
-  | { type: 'piece-start'; index: number; size: number; hash: string }
-  | { type: 'piece-end'; index: number }
-  | { type: 'ok'; index: number }
-  | { type: 'resend'; index: number }
-  | { type: 'priority'; indices: number[] }
-  | { type: 'buffering'; progress: number; bufferedSeconds: number }
-  | { type: 'ready' }
-  | { type: 'done' };
+    };
 
 export interface WatchPartyStateBroadcast {
   isPlaying: boolean;
@@ -346,7 +335,6 @@ export class WatchPartyService {
 
   // Host state
   private dataConnections: Map<string, DataConnection> = new Map();
-  private fileDataConnections: Map<string, DataConnection> = new Map();
   private mediaCalls: Map<string, MediaConnection> = new Map();
   private currentStream: MediaStream | null = null;
   private guestCount = 0;
@@ -360,7 +348,6 @@ export class WatchPartyService {
 
   // Guest state
   private guestDataConn: DataConnection | null = null;
-  private guestFileConn: DataConnection | null = null;
   private guestIncomingStream: MediaStream | null = null;
   private pendingGuestCommands: WatchPartyCommand[] = [];
 
@@ -732,24 +719,6 @@ export class WatchPartyService {
   }
 
   private handleIncomingGuestConnection(conn: DataConnection) {
-    if (conn.label === 'file') {
-      conn.on('open', () => {
-        if (!this.dataConnections.has(conn.peer)) {
-          conn.close();
-          return;
-        }
-        this.fileDataConnections.set(conn.peer, conn);
-      });
-      conn.on('data', (data) => {
-        const cmd = data as WatchPartyCommand;
-        this.commandListeners.forEach((cb) => cb(cmd, conn.peer));
-      });
-      conn.on('close', () => {
-        this.fileDataConnections.delete(conn.peer);
-      });
-      return;
-    }
-
     // Check max guest limit: max 3 guests
     if (this.dataConnections.size >= 3) {
       conn.on('open', () => {
@@ -870,25 +839,6 @@ export class WatchPartyService {
             clearTimeout(connTimeout);
             this.setStatus('connected');
             this.setViewerCount(1);
-
-            // Connect secondary data channel for file transfer
-            try {
-              const fileConn = this.peer!.connect(hostPeerId, {
-                label: 'file',
-                reliable: true,
-              });
-              this.guestFileConn = fileConn;
-              fileConn.on('data', (data) => {
-                const cmd = data as WatchPartyCommand;
-                this.commandListeners.forEach((cb) => cb(cmd, hostPeerId));
-              });
-              fileConn.on('close', () => {
-                this.guestFileConn = null;
-              });
-            } catch (e) {
-              console.warn('Failed to connect file data channel:', e);
-            }
-
             try {
               if (initialName) {
                 conn.send({ type: 'hello', name: initialName } satisfies WatchPartyCommand);
@@ -1021,27 +971,6 @@ export class WatchPartyService {
         conn.send(cmd);
       } catch (e) {
         console.warn('Failed to send command to peer:', peerId, e);
-      }
-    }
-  }
-
-  public sendFileCommand(peerId: string, cmd: WatchPartyCommand): void {
-    const conn = this.fileDataConnections.get(peerId);
-    if (conn && conn.open) {
-      try {
-        conn.send(cmd);
-      } catch (e) {
-        console.warn('Failed to send file command to peer:', peerId, e);
-      }
-    }
-  }
-
-  public sendGuestFileCommand(cmd: WatchPartyCommand): void {
-    if (this.guestFileConn && this.guestFileConn.open) {
-      try {
-        this.guestFileConn.send(cmd);
-      } catch (e) {
-        console.warn('Failed to send file command to host:', e);
       }
     }
   }
