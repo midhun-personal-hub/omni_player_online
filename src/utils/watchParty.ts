@@ -120,19 +120,22 @@ export type WatchPartyCommand =
         | { type: 'candidate'; candidate: RTCIceCandidateInit };
     }
   | {
-      type: 'movie-signal';
-      senderId?: string;
-      targetId?: string;
-      signal:
-        | { type: 'description'; description: RTCSessionDescriptionInit }
-        | { type: 'candidate'; candidate: RTCIceCandidateInit };
-    }
-  | {
       type: 'stream-owner';
       streamId: string;
       peerId: string;
       name: string;
-    };
+    }
+  | { type: 'manifest'; fingerprint: string; name: string; size: number; type: string; duration: number; pieceSize: number; pieceCount: number; pieceHashes: string[] }
+  | { type: 'have'; fingerprint: string; bitmap: boolean[] }
+  | { type: 'have-all'; fingerprint: string }
+  | { type: 'piece-start'; index: number; size: number; hash: string }
+  | { type: 'piece-end'; index: number }
+  | { type: 'ok'; index: number }
+  | { type: 'resend'; index: number }
+  | { type: 'priority'; indices: number[] }
+  | { type: 'buffering'; progress: number; bufferedSeconds: number }
+  | { type: 'ready' }
+  | { type: 'done' };
 
 export interface WatchPartyStateBroadcast {
   isPlaying: boolean;
@@ -343,15 +346,7 @@ export class WatchPartyService {
 
   // Host state
   private dataConnections: Map<string, DataConnection> = new Map();
-  // Dedicated movie RTCPeerConnection instances (peerId -> MoviePeerConnectionEntry)
-  private moviePeerConnections: Map<
-    string,
-    {
-      pc: RTCPeerConnection;
-      iceCandidateQueue: RTCIceCandidateInit[];
-      isSettingRemoteAnswerPending: boolean;
-    }
-  > = new Map();
+  private fileDataConnections: Map<string, DataConnection> = new Map();
   private mediaCalls: Map<string, MediaConnection> = new Map();
   private currentStream: MediaStream | null = null;
   private guestCount = 0;
@@ -363,10 +358,9 @@ export class WatchPartyService {
   private bandwidthLimitationSeconds = 0;
   private previousBytesSentMap: Map<string, number> = new Map();
 
-  // Guest state: dedicated movie RTCPeerConnection instance
+  // Guest state
   private guestDataConn: DataConnection | null = null;
-  private guestMoviePc: RTCPeerConnection | null = null;
-  private guestMovieIceQueue: RTCIceCandidateInit[] = [];
+  private guestFileConn: DataConnection | null = null;
   private guestIncomingStream: MediaStream | null = null;
   private pendingGuestCommands: WatchPartyCommand[] = [];
 
@@ -427,20 +421,20 @@ export class WatchPartyService {
   }
 
   /**
-   * Updates movie stream quality live on all active movie peer connections without renegotiating.
+   * Updates movie stream quality live on all active peer connections without renegotiating.
    */
   public async setMovieQuality(quality: MovieQuality): Promise<void> {
     this.movieQuality = quality;
     this.bandwidthLimitationSeconds = 0;
     this.qualityListeners.forEach((cb) => cb(quality));
 
-    for (const [, entry] of this.moviePeerConnections.entries()) {
-      const pc = entry.pc;
-      if (pc && pc.connectionState !== 'closed') {
+    for (const [, call] of this.mediaCalls.entries()) {
+      const pc = call.peerConnection;
+      if (pc) {
         await applyMovieBitrate(pc, quality);
       }
     }
-    console.info(`[WebRTC MovieStream] Live movie quality updated to: ${quality}`);
+    console.info(`[OmniPlay Stream] Live movie quality updated to: ${quality}`);
   }
 
   /**
@@ -448,10 +442,10 @@ export class WatchPartyService {
    */
   private stepDownQuality(): void {
     if (this.movieQuality === '1080p') {
-      console.warn('[WebRTC MovieStream] Bandwidth limited for >10s. Stepping down to 720p.');
+      console.warn('[OmniPlay Stream] Bandwidth limited for >10s. Stepping down to 720p.');
       this.setMovieQuality('720p');
     } else if (this.movieQuality === '720p') {
-      console.warn('[WebRTC MovieStream] Bandwidth limited for >10s. Stepping down to Auto mode (balanced).');
+      console.warn('[OmniPlay Stream] Bandwidth limited for >10s. Stepping down to Auto mode (balanced).');
       this.setMovieQuality('auto');
     }
   }
@@ -464,12 +458,12 @@ export class WatchPartyService {
     if (this.statsIntervalId) return;
 
     this.statsIntervalId = setInterval(async () => {
-      if (this.role !== 'host' || this.moviePeerConnections.size === 0) return;
+      if (this.role !== 'host' || this.mediaCalls.size === 0) return;
 
       let isAnyPeerBandwidthLimited = false;
 
-      for (const [peerId, entry] of this.moviePeerConnections.entries()) {
-        const pc = entry.pc;
+      for (const [peerId, call] of this.mediaCalls.entries()) {
+        const pc = call.peerConnection;
         if (!pc || pc.connectionState === 'closed') continue;
 
         try {
@@ -490,7 +484,7 @@ export class WatchPartyService {
               const bitrateKbps = Math.round((deltaBytes * 8) / (3 * 1000));
 
               console.log(
-                `[WebRTC MovieStream Stats] Peer: ${peerId} | Resolution: ${frameWidth}x${frameHeight} | FPS: ${framesPerSecond} | Bitrate: ${bitrateKbps} kbps | Limit Reason: ${qualityLimitationReason} (Mode: ${this.movieQuality})`
+                `[OmniPlay Stream Stats] Peer: ${peerId} | Resolution: ${frameWidth}x${frameHeight} | FPS: ${framesPerSecond} | Bitrate: ${bitrateKbps} kbps | Limit Reason: ${qualityLimitationReason} (Mode: ${this.movieQuality})`
               );
 
               if (qualityLimitationReason === 'bandwidth') {
@@ -525,42 +519,14 @@ export class WatchPartyService {
   }
 
   /**
-   * Initializes a dedicated RTCPeerConnection for the movie stream to a connected guest.
+   * Sets up transceiver codec preferences, sender parameters, SDP transforms,
+   * and connection state listeners on a movie stream call.
    */
-  public async startMovieStreamToPeer(guestPeerId: string): Promise<void> {
-    if (!this.currentStream) {
-      console.log(`[WebRTC MovieStream] No current stream available yet for peer ${guestPeerId}`);
-      return;
-    }
+  private configureMovieCall(call: MediaConnection): void {
+    const pc = call.peerConnection;
+    if (!pc) return;
 
-    const existing = this.moviePeerConnections.get(guestPeerId);
-    if (existing) {
-      try {
-        existing.pc.close();
-      } catch {}
-      this.moviePeerConnections.delete(guestPeerId);
-    }
-
-    const iceServers = getIceServers();
-    console.log(
-      `[WebRTC MovieStream] Creating dedicated RTCPeerConnection for movie streaming to ${guestPeerId}`
-    );
-    const pc = new RTCPeerConnection({ iceServers });
-
-    const entry = {
-      pc,
-      iceCandidateQueue: [] as RTCIceCandidateInit[],
-      isSettingRemoteAnswerPending: false,
-    };
-    this.moviePeerConnections.set(guestPeerId, entry);
-
-    for (const track of this.currentStream.getTracks()) {
-      console.log(
-        `[WebRTC MovieStream] Adding movie track (${track.kind}, id=${track.id}) to dedicated movie RTCPeerConnection`
-      );
-      pc.addTrack(track, this.currentStream);
-    }
-
+    // 1. Call setCodecPreferences on video transceiver with VP9 first, then H264, before offer
     try {
       const transceivers = pc.getTransceivers ? pc.getTransceivers() : [];
       const videoTransceiver = transceivers.find((t) => t.sender.track?.kind === 'video');
@@ -568,271 +534,27 @@ export class WatchPartyService {
         applyCodecPreferences(videoTransceiver);
       }
     } catch (err) {
-      console.warn('[WebRTC MovieStream] Codec preference error:', err);
+      console.warn('[OmniPlay WebRTC] Video transceiver lookup warning:', err);
     }
 
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate) {
-        this.sendToPeer(guestPeerId, {
-          type: 'movie-signal',
-          senderId: this.getMyPeerId() || 'host',
-          targetId: guestPeerId,
-          signal: {
-            type: 'candidate',
-            candidate: candidate.toJSON(),
-          },
-        });
-      }
-    };
+    // 2. Call sender.setParameters immediately after tracks added
+    applyMovieBitrate(pc, this.movieQuality);
 
-    pc.onsignalingstatechange = () => {
-      console.log(`[WebRTC MovieStream] signalingState for ${guestPeerId}: ${pc.signalingState}`);
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log(`[WebRTC MovieStream] connectionState for ${guestPeerId}: ${pc.connectionState}`);
+    // 3. Re-apply once connectionState reaches 'connected'
+    const handleStateChange = () => {
       if (pc.connectionState === 'connected') {
         applyMovieBitrate(pc, this.movieQuality);
-      } else if (pc.connectionState === 'failed') {
-        console.warn(`[WebRTC MovieStream] Connection failed with ${guestPeerId}, attempting ICE restart.`);
-        try {
-          pc.restartIce();
-        } catch {}
-      } else if (pc.connectionState === 'closed') {
-        this.moviePeerConnections.delete(guestPeerId);
-        if (this.moviePeerConnections.size === 0) {
-          this.stopStatsPolling();
-        }
       }
     };
+    pc.addEventListener('connectionstatechange', handleStateChange);
 
-    pc.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC MovieStream] iceConnectionState for ${guestPeerId}: ${pc.iceConnectionState}`);
-    };
-
-    try {
-      const offer = await pc.createOffer();
-      const sdpWithFallback = injectSdpBandwidthFallback(offer.sdp || '', 8000);
-      await pc.setLocalDescription({ type: 'offer', sdp: sdpWithFallback });
-
-      console.log(`[WebRTC MovieStream] Local movie offer set for ${guestPeerId}, sending signal`);
-      this.sendToPeer(guestPeerId, {
-        type: 'movie-signal',
-        senderId: this.getMyPeerId() || 'host',
-        targetId: guestPeerId,
-        signal: {
-          type: 'description',
-          description: {
-            type: 'offer',
-            sdp: sdpWithFallback,
-          },
-        },
-      });
-
+    // Also fallback with timer in case connectionState fires before listener or via iceConnectionState
+    setTimeout(() => {
       applyMovieBitrate(pc, this.movieQuality);
-      this.startStatsPolling();
-    } catch (err) {
-      console.error(`[WebRTC MovieStream] Error initiating movie stream offer to ${guestPeerId}:`, err);
-    }
-  }
+    }, 800);
 
-  /**
-   * Handles incoming movie streaming signals (answer or ICE candidates) from a guest.
-   */
-  public async handleIncomingMovieSignal(
-    guestPeerId: string,
-    signal: {
-      type: 'description' | 'candidate';
-      description?: RTCSessionDescriptionInit;
-      candidate?: RTCIceCandidateInit;
-    }
-  ): Promise<void> {
-    const entry = this.moviePeerConnections.get(guestPeerId);
-    if (!entry) {
-      console.warn(`[WebRTC MovieStream] Received movie signal for unknown peer: ${guestPeerId}`);
-      return;
-    }
-    const { pc } = entry;
-
-    try {
-      if (signal.type === 'description' && signal.description) {
-        const description = signal.description;
-        if (description.type === 'answer') {
-          console.log(`[WebRTC MovieStream] Setting remote movie answer from ${guestPeerId}`);
-          entry.isSettingRemoteAnswerPending = true;
-          await pc.setRemoteDescription(description);
-          entry.isSettingRemoteAnswerPending = false;
-
-          while (entry.iceCandidateQueue.length > 0) {
-            const cand = entry.iceCandidateQueue.shift();
-            if (cand) {
-              try {
-                await pc.addIceCandidate(cand);
-              } catch (e) {
-                console.warn('[WebRTC MovieStream] Error adding queued ICE candidate:', e);
-              }
-            }
-          }
-
-          applyMovieBitrate(pc, this.movieQuality);
-        }
-      } else if (signal.type === 'candidate' && signal.candidate) {
-        const candidate = signal.candidate;
-        if (!pc.remoteDescription || !pc.remoteDescription.type) {
-          entry.iceCandidateQueue.push(candidate);
-        } else {
-          try {
-            await pc.addIceCandidate(candidate);
-          } catch (err) {
-            console.warn('[WebRTC MovieStream] Error adding ICE candidate:', err);
-          }
-        }
-      }
-    } catch (err) {
-      console.error(`[WebRTC MovieStream] Error handling incoming movie signal from ${guestPeerId}:`, err);
-    }
-  }
-
-  /**
-   * Guest side: handles incoming movie streaming signals (offer or ICE candidates) from host.
-   */
-  public async handleGuestIncomingMovieSignal(signal: {
-    type: 'description' | 'candidate';
-    description?: RTCSessionDescriptionInit;
-    candidate?: RTCIceCandidateInit;
-  }): Promise<void> {
-    try {
-      if (signal.type === 'description' && signal.description) {
-        const description = signal.description;
-        if (description.type === 'offer') {
-          console.log('[WebRTC MovieStream] Guest received movie offer from Host');
-
-          if (this.guestMoviePc) {
-            try {
-              this.guestMoviePc.close();
-            } catch {}
-            this.guestMoviePc = null;
-          }
-
-          const iceServers = getIceServers();
-          console.log(
-            '[WebRTC MovieStream] Guest creating dedicated RTCPeerConnection for movie streaming'
-          );
-          const pc = new RTCPeerConnection({ iceServers });
-          this.guestMoviePc = pc;
-          this.guestMovieIceQueue = [];
-
-          pc.ontrack = (event) => {
-            console.log(
-              `[WebRTC MovieStream] Guest movie ontrack: kind=${event.track.kind}, id=${event.track.id}`
-            );
-            if (event.streams && event.streams[0]) {
-              this.guestIncomingStream = event.streams[0];
-            } else {
-              if (!this.guestIncomingStream) {
-                this.guestIncomingStream = new MediaStream();
-              }
-              const existingTrack = this.guestIncomingStream
-                .getTracks()
-                .find((t) => t.id === event.track.id || t.kind === event.track.kind);
-              if (existingTrack) {
-                this.guestIncomingStream.removeTrack(existingTrack);
-              }
-              this.guestIncomingStream.addTrack(event.track);
-            }
-
-            event.track.onended = () => {
-              console.log(`[WebRTC MovieStream] Movie track ended: ${event.track.kind}`);
-            };
-
-            this.streamListeners.forEach((cb) => cb(this.guestIncomingStream!));
-          };
-
-          pc.onicecandidate = ({ candidate }) => {
-            if (candidate) {
-              this.sendCommand({
-                type: 'movie-signal',
-                senderId: this.getMyPeerId() || undefined,
-                targetId: 'host',
-                signal: {
-                  type: 'candidate',
-                  candidate: candidate.toJSON(),
-                },
-              });
-            }
-          };
-
-          pc.onconnectionstatechange = () => {
-            console.log(`[WebRTC MovieStream] Guest movie connectionState: ${pc.connectionState}`);
-            if (pc.connectionState === 'failed') {
-              console.warn('[WebRTC MovieStream] Guest movie connection failed, restarting ICE');
-              try {
-                pc.restartIce();
-              } catch {}
-            }
-          };
-
-          pc.onsignalingstatechange = () => {
-            console.log(`[WebRTC MovieStream] Guest movie signalingState: ${pc.signalingState}`);
-          };
-
-          pc.oniceconnectionstatechange = () => {
-            console.log(`[WebRTC MovieStream] Guest movie iceConnectionState: ${pc.iceConnectionState}`);
-          };
-
-          await pc.setRemoteDescription(description);
-          console.log('[WebRTC MovieStream] Guest movie setRemoteDescription (offer) success');
-
-          while (this.guestMovieIceQueue.length > 0) {
-            const cand = this.guestMovieIceQueue.shift();
-            if (cand) {
-              try {
-                await pc.addIceCandidate(cand);
-              } catch (e) {
-                console.warn('[WebRTC MovieStream] Guest error adding queued ICE candidate:', e);
-              }
-            }
-          }
-
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          console.log('[WebRTC MovieStream] Guest created and set local answer, sending signal to host');
-
-          this.sendCommand({
-            type: 'movie-signal',
-            senderId: this.getMyPeerId() || undefined,
-            targetId: 'host',
-            signal: {
-              type: 'description',
-              description: {
-                type: 'answer',
-                sdp: answer.sdp,
-              },
-            },
-          });
-        }
-      } else if (signal.type === 'candidate' && signal.candidate) {
-        const candidate = signal.candidate;
-        if (
-          !this.guestMoviePc ||
-          !this.guestMoviePc.remoteDescription ||
-          !this.guestMoviePc.remoteDescription.type
-        ) {
-          console.log(
-            '[WebRTC MovieStream] Guest queueing movie candidate before remoteDescription is set'
-          );
-          this.guestMovieIceQueue.push(candidate);
-        } else {
-          try {
-            await this.guestMoviePc.addIceCandidate(candidate);
-          } catch (err) {
-            console.warn('[WebRTC MovieStream] Guest error adding ICE candidate:', err);
-          }
-        }
-      }
-    } catch (err) {
-      console.error('[WebRTC MovieStream] Error handling guest movie signal:', err);
-    }
+    // Start stats logging
+    this.startStatsPolling();
   }
 
   private setStatus(newStatus: WatchPartyStatus, errorMsg?: string) {
@@ -1010,6 +732,24 @@ export class WatchPartyService {
   }
 
   private handleIncomingGuestConnection(conn: DataConnection) {
+    if (conn.label === 'file') {
+      conn.on('open', () => {
+        if (!this.dataConnections.has(conn.peer)) {
+          conn.close();
+          return;
+        }
+        this.fileDataConnections.set(conn.peer, conn);
+      });
+      conn.on('data', (data) => {
+        const cmd = data as WatchPartyCommand;
+        this.commandListeners.forEach((cb) => cb(cmd, conn.peer));
+      });
+      conn.on('close', () => {
+        this.fileDataConnections.delete(conn.peer);
+      });
+      return;
+    }
+
     // Check max guest limit: max 3 guests
     if (this.dataConnections.size >= 3) {
       conn.on('open', () => {
@@ -1033,18 +773,32 @@ export class WatchPartyService {
       this.friendJoinedListeners.forEach((cb) => cb(conn.peer));
       this.broadcastRoster();
 
-      // If host has an active stream, start dedicated movie streaming RTCPeerConnection to the guest now
-      if (this.currentStream) {
-        this.startMovieStreamToPeer(conn.peer);
+      // If host has an active stream, call the guest now
+      if (this.peer && this.currentStream) {
+        try {
+          const call = this.peer.call(conn.peer, this.currentStream, {
+            metadata: { kind: 'movie' },
+            // SDP transform fallback: inject b=AS:8000 into the offer video section
+            sdpTransform: (sdp: string) => injectSdpBandwidthFallback(sdp, 8000),
+          });
+          this.mediaCalls.set(conn.peer, call);
+          call.on('close', () => {
+            this.mediaCalls.delete(conn.peer);
+            if (this.mediaCalls.size === 0) {
+              this.stopStatsPolling();
+            }
+          });
+          call.on('error', (e) => console.warn('Call error with peer:', conn.peer, e));
+
+          this.configureMovieCall(call);
+        } catch (e) {
+          console.warn('Failed to call guest:', e);
+        }
       }
     });
 
     conn.on('data', (data) => {
       const cmd = data as WatchPartyCommand;
-      if (cmd.type === 'movie-signal') {
-        this.handleIncomingMovieSignal(conn.peer, cmd.signal);
-        return;
-      }
       this.commandListeners.forEach((cb) => cb(cmd, conn.peer));
     });
 
@@ -1053,18 +807,6 @@ export class WatchPartyService {
       this.dataConnections.delete(peerId);
       this.clientNames.delete(peerId);
       this.broadcastRoster();
-
-      const movieEntry = this.moviePeerConnections.get(peerId);
-      if (movieEntry) {
-        try {
-          movieEntry.pc.close();
-        } catch {}
-        this.moviePeerConnections.delete(peerId);
-        if (this.moviePeerConnections.size === 0) {
-          this.stopStatsPolling();
-        }
-      }
-
       const call = this.mediaCalls.get(peerId);
       if (call) {
         call.close();
@@ -1128,6 +870,25 @@ export class WatchPartyService {
             clearTimeout(connTimeout);
             this.setStatus('connected');
             this.setViewerCount(1);
+
+            // Connect secondary data channel for file transfer
+            try {
+              const fileConn = this.peer!.connect(hostPeerId, {
+                label: 'file',
+                reliable: true,
+              });
+              this.guestFileConn = fileConn;
+              fileConn.on('data', (data) => {
+                const cmd = data as WatchPartyCommand;
+                this.commandListeners.forEach((cb) => cb(cmd, hostPeerId));
+              });
+              fileConn.on('close', () => {
+                this.guestFileConn = null;
+              });
+            } catch (e) {
+              console.warn('Failed to connect file data channel:', e);
+            }
+
             try {
               if (initialName) {
                 conn.send({ type: 'hello', name: initialName } satisfies WatchPartyCommand);
@@ -1149,10 +910,6 @@ export class WatchPartyService {
 
           conn.on('data', (data) => {
             const cmd = data as WatchPartyCommand;
-            if (cmd.type === 'movie-signal') {
-              this.handleGuestIncomingMovieSignal(cmd.signal);
-              return;
-            }
             if (cmd.type === 'room-full') {
               this.setStatus('error', 'Room is full (maximum 3 viewers allowed).');
               return;
@@ -1268,6 +1025,27 @@ export class WatchPartyService {
     }
   }
 
+  public sendFileCommand(peerId: string, cmd: WatchPartyCommand): void {
+    const conn = this.fileDataConnections.get(peerId);
+    if (conn && conn.open) {
+      try {
+        conn.send(cmd);
+      } catch (e) {
+        console.warn('Failed to send file command to peer:', peerId, e);
+      }
+    }
+  }
+
+  public sendGuestFileCommand(cmd: WatchPartyCommand): void {
+    if (this.guestFileConn && this.guestFileConn.open) {
+      try {
+        this.guestFileConn.send(cmd);
+      } catch (e) {
+        console.warn('Failed to send file command to host:', e);
+      }
+    }
+  }
+
   public replaceMediaStream(newStream: MediaStream): void {
     this.currentStream = newStream;
     if (this.role !== 'host') return;
@@ -1275,45 +1053,54 @@ export class WatchPartyService {
     const newVideoTrack = newStream.getVideoTracks()[0] || null;
     const newAudioTrack = newStream.getAudioTracks()[0] || null;
 
-    for (const [peerId, entry] of this.moviePeerConnections.entries()) {
-      const pc = entry.pc;
-      if (pc.connectionState === 'closed') continue;
+    for (const [peerId, call] of this.mediaCalls.entries()) {
+      const pc = call.peerConnection;
+      if (!pc) continue;
 
       const senders = pc.getSenders();
       const videoSender = senders.find((s) => s.track?.kind === 'video');
       const audioSender = senders.find((s) => s.track?.kind === 'audio');
 
-      let needRenegotiation = false;
+      let replacedVideo = false;
+      let replacedAudio = false;
 
       if (videoSender && newVideoTrack) {
         videoSender
           .replaceTrack(newVideoTrack)
           .then(() => applyMovieBitrate(pc, this.movieQuality))
-          .catch((err) => console.warn('[WebRTC MovieStream] replaceTrack video error:', err));
-      } else if (newVideoTrack && !videoSender) {
-        needRenegotiation = true;
+          .catch((err) => console.warn('replaceTrack video error:', err));
+        replacedVideo = true;
       }
 
       if (audioSender && newAudioTrack) {
         audioSender
           .replaceTrack(newAudioTrack)
-          .catch((err) => console.warn('[WebRTC MovieStream] replaceTrack audio error:', err));
-      } else if (newAudioTrack && !audioSender) {
-        needRenegotiation = true;
+          .catch((err) => console.warn('replaceTrack audio error:', err));
+        replacedAudio = true;
       }
 
-      if (needRenegotiation) {
-        console.log(
-          `[WebRTC MovieStream] Track kind transition on peer ${peerId}, re-initiating movie stream connection`
-        );
-        this.startMovieStreamToPeer(peerId);
-      }
-    }
-
-    // Ensure any connected guest that doesn't have a movie connection yet receives the stream
-    for (const peerId of this.dataConnections.keys()) {
-      if (!this.moviePeerConnections.has(peerId)) {
-        this.startMovieStreamToPeer(peerId);
+      // If kind transition happened (e.g. was audio-only without a video sender, but now has video track)
+      if ((newVideoTrack && !videoSender) || (newAudioTrack && !audioSender)) {
+        try {
+          call.close();
+          if (this.peer) {
+            const newCall = this.peer.call(peerId, newStream, {
+              metadata: { kind: 'movie' },
+              sdpTransform: (sdp: string) => injectSdpBandwidthFallback(sdp, 8000),
+            });
+            this.mediaCalls.set(peerId, newCall);
+            newCall.on('close', () => {
+              this.mediaCalls.delete(peerId);
+              if (this.mediaCalls.size === 0) {
+                this.stopStatsPolling();
+              }
+            });
+            newCall.on('error', (e) => console.warn('Re-call error:', e));
+            this.configureMovieCall(newCall);
+          }
+        } catch (err) {
+          console.warn('Call renegotiation error:', err);
+        }
       }
     }
   }
@@ -1334,22 +1121,6 @@ export class WatchPartyService {
         // ignore
       }
     }
-
-    // Close and clean up all movie RTCPeerConnections
-    for (const entry of this.moviePeerConnections.values()) {
-      try {
-        entry.pc.close();
-      } catch {}
-    }
-    this.moviePeerConnections.clear();
-
-    if (this.guestMoviePc) {
-      try {
-        this.guestMoviePc.close();
-      } catch {}
-      this.guestMoviePc = null;
-    }
-    this.guestMovieIceQueue = [];
 
     // Close connections
     this.dataConnections.forEach((conn) => {
