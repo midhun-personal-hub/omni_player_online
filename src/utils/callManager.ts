@@ -566,11 +566,11 @@ export class CallManager {
       try {
         currentEntry.makingOffer = true;
         console.log(
-          `[WebRTC Call] onnegotiationneeded (peer=${remotePeerId}, polite=${this.isPolite}): creating offer, signalingState=${pc.signalingState}`
+          `[WebRTC VideoCall] onnegotiationneeded (peer=${remotePeerId}, polite=${this.isPolite}): creating offer, signalingState=${pc.signalingState}`
         );
         await pc.setLocalDescription();
         console.log(
-          `[WebRTC Call] Local description set (offer) for ${remotePeerId}, signalingState=${pc.signalingState}`
+          `[WebRTC VideoCall] Local description set (offer) for ${remotePeerId}, signalingState=${pc.signalingState}`
         );
         if (pc.localDescription) {
           this.callbacks.onSendSignal(remotePeerId, {
@@ -582,7 +582,7 @@ export class CallManager {
           });
         }
       } catch (err) {
-        console.error(`[WebRTC Call] Error in onnegotiationneeded with ${remotePeerId}:`, err);
+        console.error(`[WebRTC VideoCall] Error in onnegotiationneeded with ${remotePeerId}:`, err);
       } finally {
         currentEntry.makingOffer = false;
       }
@@ -600,14 +600,14 @@ export class CallManager {
 
     // 3. onsignalingstatechange (Required for verification)
     pc.onsignalingstatechange = () => {
-      console.log(`[WebRTC Call] signalingState for peer ${remotePeerId}: ${pc.signalingState}`);
+      console.log(`[WebRTC VideoCall] signalingState for peer ${remotePeerId}: ${pc.signalingState}`);
     };
 
     // 4. onconnectionstatechange (Required for verification)
     pc.onconnectionstatechange = () => {
-      console.log(`[WebRTC Call] connectionState for peer ${remotePeerId}: ${pc.connectionState}`);
+      console.log(`[WebRTC VideoCall] connectionState for peer ${remotePeerId}: ${pc.connectionState}`);
       if (pc.connectionState === 'failed') {
-        console.warn(`[WebRTC Call] Connection failed with ${remotePeerId}, attempting ICE restart.`);
+        console.warn(`[WebRTC VideoCall] Connection failed with ${remotePeerId}, attempting ICE restart.`);
         try {
           pc.restartIce();
         } catch {}
@@ -618,13 +618,13 @@ export class CallManager {
 
     // 5. oniceconnectionstatechange
     pc.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC Call] iceConnectionState for peer ${remotePeerId}: ${pc.iceConnectionState}`);
+      console.log(`[WebRTC VideoCall] iceConnectionState for peer ${remotePeerId}: ${pc.iceConnectionState}`);
     };
 
     // 6. ontrack (Required for verification & handles late-arriving tracks)
     pc.ontrack = (event) => {
       console.log(
-        `[WebRTC Call] ontrack event from ${remotePeerId}: kind=${event.track.kind}, id=${event.track.id}, streamCount=${event.streams.length}`
+        `[WebRTC VideoCall] ontrack event from ${remotePeerId}: kind=${event.track.kind}, id=${event.track.id}, streamCount=${event.streams.length}`
       );
 
       const targetStream = entry!.remoteStream;
@@ -634,15 +634,15 @@ export class CallManager {
       }
 
       event.track.onmute = () => {
-        console.log(`[WebRTC Call] onmute track ${event.track.kind} from ${remotePeerId}`);
+        console.log(`[WebRTC VideoCall] onmute track ${event.track.kind} from ${remotePeerId}`);
         this.syncRemoteParticipant(remotePeerId);
       };
       event.track.onunmute = () => {
-        console.log(`[WebRTC Call] onunmute track ${event.track.kind} from ${remotePeerId}`);
+        console.log(`[WebRTC VideoCall] onunmute track ${event.track.kind} from ${remotePeerId}`);
         this.syncRemoteParticipant(remotePeerId);
       };
       event.track.onended = () => {
-        console.log(`[WebRTC Call] onended track ${event.track.kind} from ${remotePeerId}`);
+        console.log(`[WebRTC VideoCall] onended track ${event.track.kind} from ${remotePeerId}`);
         this.syncRemoteParticipant(remotePeerId);
       };
 
@@ -668,10 +668,10 @@ export class CallManager {
       );
 
       if (!matchingSender) {
-        console.log(`[WebRTC Call] Adding local track ${track.kind} (${track.id}) to RTCPeerConnection`);
+        console.log(`[WebRTC VideoCall] Adding local track ${track.kind} (${track.id}) to RTCPeerConnection`);
         pc.addTrack(track, this.localStream);
       } else if (matchingSender.track !== track) {
-        console.log(`[WebRTC Call] Replacing local track ${track.kind} on existing sender`);
+        console.log(`[WebRTC VideoCall] Replacing local track ${track.kind} on existing sender`);
         matchingSender.replaceTrack(track).catch((err) => console.warn('replaceTrack error:', err));
       }
     }
@@ -751,14 +751,14 @@ export class CallManager {
         entry.ignoreOffer = !this.isPolite && offerCollision;
         if (entry.ignoreOffer) {
           console.log(
-            `[WebRTC Call] Impolite peer ignoring offer collision from ${peerId}, signalingState=${pc.signalingState}`
+            `[WebRTC VideoCall] Impolite peer ignoring offer collision from ${peerId}, signalingState=${pc.signalingState}`
           );
           return;
         }
 
         if (offerCollision && this.isPolite) {
           console.log(
-            `[WebRTC Call] Polite peer rolling back on offer collision from ${peerId}, signalingState=${pc.signalingState}`
+            `[WebRTC VideoCall] Polite peer rolling back on offer collision from ${peerId}, signalingState=${pc.signalingState}`
           );
           await Promise.all([
             pc.setLocalDescription({ type: 'rollback' }),
@@ -771,13 +771,13 @@ export class CallManager {
         }
 
         console.log(
-          `[WebRTC Call] setRemoteDescription success (${description.type}) from ${peerId}, signalingState=${pc.signalingState}`
+          `[WebRTC VideoCall] setRemoteDescription success (${description.type}) from ${peerId}, signalingState=${pc.signalingState}`
         );
 
         // Process queued ICE candidates that arrived before remoteDescription was set
         if (entry.iceCandidateQueue.length > 0) {
           console.log(
-            `[WebRTC Call] Draining ${entry.iceCandidateQueue.length} queued ICE candidate(s) for ${peerId}`
+            `[WebRTC VideoCall] Draining ${entry.iceCandidateQueue.length} queued ICE candidate(s) for ${peerId}`
           );
           while (entry.iceCandidateQueue.length > 0) {
             const cand = entry.iceCandidateQueue.shift();
@@ -785,7 +785,7 @@ export class CallManager {
               try {
                 await pc.addIceCandidate(cand);
               } catch (e) {
-                console.warn('[WebRTC Call] Error adding queued ICE candidate:', e);
+                console.warn('[WebRTC VideoCall] Error adding queued ICE candidate:', e);
               }
             }
           }
@@ -794,7 +794,7 @@ export class CallManager {
         if (description.type === 'offer') {
           await pc.setLocalDescription();
           console.log(
-            `[WebRTC Call] Answer created & local description set for ${peerId}, signalingState=${pc.signalingState}`
+            `[WebRTC VideoCall] Answer created & local description set for ${peerId}, signalingState=${pc.signalingState}`
           );
           if (pc.localDescription) {
             this.callbacks.onSendSignal(peerId, {
@@ -809,20 +809,20 @@ export class CallManager {
       } else if (signal.type === 'candidate') {
         const candidate = signal.candidate;
         if (!pc.remoteDescription || !pc.remoteDescription.type) {
-          console.log(`[WebRTC Call] Queueing ICE candidate for ${peerId} before remoteDescription is set`);
+          console.log(`[WebRTC VideoCall] Queueing ICE candidate for ${peerId} before remoteDescription is set`);
           entry.iceCandidateQueue.push(candidate);
         } else {
           try {
             await pc.addIceCandidate(candidate);
           } catch (err) {
             if (!entry.ignoreOffer) {
-              console.warn('[WebRTC Call] Error adding ICE candidate:', err);
+              console.warn('[WebRTC VideoCall] Error adding ICE candidate:', err);
             }
           }
         }
       }
     } catch (err) {
-      console.error(`[WebRTC Call] Error handling signal from ${peerId}:`, err);
+      console.error(`[WebRTC VideoCall] Error handling signal from ${peerId}:`, err);
     }
   }
 
