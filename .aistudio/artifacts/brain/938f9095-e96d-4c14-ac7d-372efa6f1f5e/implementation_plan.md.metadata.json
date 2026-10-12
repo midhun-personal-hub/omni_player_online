@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for Part A (Movie Stream smoothness, captureStream(30), contentHint motion, scaleResolutionDownBy based on resolution, H264>VP8>VP9 codecs, slideshow guard, visibility/wakeLock), Part B (Call smoothness, 640x360 24fps camera, bandwidth sharing, fast first video), and Part C (Debug overlay ?debug=1 or Ctrl+Shift+D).",
-  "updatedAt":  "2026-10-11T18:21:09.143299451Z",
+  "summary":  "Implementation plan for maintaining two completely independent RTCPeerConnection instances for WebRTC video calls and movie streaming.",
+  "updatedAt":  "2026-10-12T04:17:09.105200920Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
