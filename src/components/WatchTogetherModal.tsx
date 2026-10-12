@@ -57,6 +57,8 @@ interface WatchTogetherModalProps {
   pausePlaybackWhileSending?: boolean;
   onTogglePausePlaybackWhileSending?: (val: boolean) => void;
   onPlayDownloadedMovie?: (file: File) => void;
+  isPreparingTransfer?: boolean;
+  hashingProgress?: { current: number; total: number } | null;
 }
 
 export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
@@ -86,6 +88,8 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
   pausePlaybackWhileSending = true,
   onTogglePausePlaybackWhileSending,
   onPlayDownloadedMovie,
+  isPreparingTransfer = false,
+  hashingProgress = null,
 }) => {
   const [activeTab, setActiveTab] = useState<'create' | 'join'>(
     role === 'guest' ? 'join' : 'create'
@@ -592,10 +596,27 @@ export const WatchTogetherModal: React.FC<WatchTogetherModalProps> = ({
                             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                             <span>Transfer complete! Guests are on local playback.</span>
                           </div>
+                        ) : isPreparingTransfer ? (
+                          <button
+                            type="button"
+                            disabled={true}
+                            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/40 cursor-wait"
+                          >
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>
+                              Preparing hashes... (${hashingProgress ? hashingProgress.current : 0}/${hashingProgress ? hashingProgress.total : 0} MB)
+                            </span>
+                          </button>
                         ) : (
                           <button
                             type="button"
-                            onClick={() => onStartFileTransfer?.(currentMediaFile)}
+                            onClick={async () => {
+                              try {
+                                await onStartFileTransfer?.(currentMediaFile);
+                              } catch (err: any) {
+                                onShowToast?.(err?.message || 'Failed to start transfer');
+                              }
+                            }}
                             disabled={viewerCount === 0}
                             className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-xs font-semibold bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           >

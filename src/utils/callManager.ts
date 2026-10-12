@@ -48,10 +48,6 @@ interface PeerConnectionEntry {
   iceCandidateQueue: RTCIceCandidateInit[];
 }
 
-const CALL_WIDTH = 640;
-const CALL_HEIGHT = 360;
-const CALL_FPS = 24;
-
 export class CallManager {
   private localStream: MediaStream | null = null;
   private myPeerId: string | null = null;
@@ -64,8 +60,6 @@ export class CallManager {
   private bandwidthSaver: boolean = false;
   private quality: CallQuality = 'medium';
   private duckingEnabled: boolean = true;
-  private poorNetwork: boolean = false;
-  private goodStatsCounter: number = 0;
 
   // Active peer connections: peerId -> PeerConnectionEntry
   private peerConnections: Map<string, PeerConnectionEntry> = new Map();
@@ -368,9 +362,9 @@ export class CallManager {
         const newStream = await navigator.mediaDevices.getUserMedia({
           video: {
             deviceId: { exact: deviceId },
-            width: { ideal: 640 },
-            height: { ideal: 360 },
-            frameRate: { ideal: 24, max: 24 },
+            width: { ideal: 320 },
+            height: { ideal: 240 },
+            frameRate: { ideal: 15, max: 15 },
           },
         });
         const newVideoTrack = newStream.getVideoTracks()[0];
@@ -422,9 +416,9 @@ export class CallManager {
     try {
       const constraints: MediaStreamConstraints = {
         video: {
-          width: { ideal: 640 },
-          height: { ideal: 360 },
-          frameRate: { ideal: 24, max: 24 },
+          width: { ideal: 320 },
+          height: { ideal: 240 },
+          frameRate: { ideal: 15, max: 15 },
           facingMode: 'user',
           ...(this.selectedVideoDeviceId ? { deviceId: { exact: this.selectedVideoDeviceId } } : {}),
         },
@@ -572,11 +566,11 @@ export class CallManager {
       try {
         currentEntry.makingOffer = true;
         console.log(
-          `[WebRTC Call] onnegotiationneeded (peer=${remotePeerId}, polite=${this.isPolite}): creating offer, signalingState=${pc.signalingState}`
+          `[WebRTC VideoCall] onnegotiationneeded (peer=${remotePeerId}, polite=${this.isPolite}): creating offer, signalingState=${pc.signalingState}`
         );
         await pc.setLocalDescription();
         console.log(
-          `[WebRTC Call] Local description set (offer) for ${remotePeerId}, signalingState=${pc.signalingState}`
+          `[WebRTC VideoCall] Local description set (offer) for ${remotePeerId}, signalingState=${pc.signalingState}`
         );
         if (pc.localDescription) {
           this.callbacks.onSendSignal(remotePeerId, {
@@ -588,7 +582,7 @@ export class CallManager {
           });
         }
       } catch (err) {
-        console.error(`[WebRTC Call] Error in onnegotiationneeded with ${remotePeerId}:`, err);
+        console.error(`[WebRTC VideoCall] Error in onnegotiationneeded with ${remotePeerId}:`, err);
       } finally {
         currentEntry.makingOffer = false;
       }
@@ -604,22 +598,16 @@ export class CallManager {
       }
     };
 
-    const isDebug = () => typeof window !== 'undefined' && window.location.search.includes('debug=1');
-
     // 3. onsignalingstatechange (Required for verification)
     pc.onsignalingstatechange = () => {
-      if (isDebug()) {
-        console.log(`[call] signalingState for peer ${remotePeerId}: ${pc.signalingState}`);
-      }
+      console.log(`[WebRTC VideoCall] signalingState for peer ${remotePeerId}: ${pc.signalingState}`);
     };
 
     // 4. onconnectionstatechange (Required for verification)
     pc.onconnectionstatechange = () => {
-      if (isDebug()) {
-        console.log(`[call] connectionState for peer ${remotePeerId}: ${pc.connectionState}`);
-      }
+      console.log(`[WebRTC VideoCall] connectionState for peer ${remotePeerId}: ${pc.connectionState}`);
       if (pc.connectionState === 'failed') {
-        console.warn(`[call] Connection failed with ${remotePeerId}, attempting ICE restart.`);
+        console.warn(`[WebRTC VideoCall] Connection failed with ${remotePeerId}, attempting ICE restart.`);
         try {
           pc.restartIce();
         } catch {}
@@ -630,15 +618,13 @@ export class CallManager {
 
     // 5. oniceconnectionstatechange
     pc.oniceconnectionstatechange = () => {
-      if (isDebug()) {
-        console.log(`[call] iceConnectionState for peer ${remotePeerId}: ${pc.iceConnectionState}`);
-      }
+      console.log(`[WebRTC VideoCall] iceConnectionState for peer ${remotePeerId}: ${pc.iceConnectionState}`);
     };
 
     // 6. ontrack (Required for verification & handles late-arriving tracks)
     pc.ontrack = (event) => {
       console.log(
-        `[WebRTC Call] ontrack event from ${remotePeerId}: kind=${event.track.kind}, id=${event.track.id}, streamCount=${event.streams.length}`
+        `[WebRTC VideoCall] ontrack event from ${remotePeerId}: kind=${event.track.kind}, id=${event.track.id}, streamCount=${event.streams.length}`
       );
 
       const targetStream = entry!.remoteStream;
@@ -648,15 +634,15 @@ export class CallManager {
       }
 
       event.track.onmute = () => {
-        console.log(`[WebRTC Call] onmute track ${event.track.kind} from ${remotePeerId}`);
+        console.log(`[WebRTC VideoCall] onmute track ${event.track.kind} from ${remotePeerId}`);
         this.syncRemoteParticipant(remotePeerId);
       };
       event.track.onunmute = () => {
-        console.log(`[WebRTC Call] onunmute track ${event.track.kind} from ${remotePeerId}`);
+        console.log(`[WebRTC VideoCall] onunmute track ${event.track.kind} from ${remotePeerId}`);
         this.syncRemoteParticipant(remotePeerId);
       };
       event.track.onended = () => {
-        console.log(`[WebRTC Call] onended track ${event.track.kind} from ${remotePeerId}`);
+        console.log(`[WebRTC VideoCall] onended track ${event.track.kind} from ${remotePeerId}`);
         this.syncRemoteParticipant(remotePeerId);
       };
 
@@ -682,10 +668,10 @@ export class CallManager {
       );
 
       if (!matchingSender) {
-        console.log(`[WebRTC Call] Adding local track ${track.kind} (${track.id}) to RTCPeerConnection`);
+        console.log(`[WebRTC VideoCall] Adding local track ${track.kind} (${track.id}) to RTCPeerConnection`);
         pc.addTrack(track, this.localStream);
       } else if (matchingSender.track !== track) {
-        console.log(`[WebRTC Call] Replacing local track ${track.kind} on existing sender`);
+        console.log(`[WebRTC VideoCall] Replacing local track ${track.kind} on existing sender`);
         matchingSender.replaceTrack(track).catch((err) => console.warn('replaceTrack error:', err));
       }
     }
@@ -765,14 +751,14 @@ export class CallManager {
         entry.ignoreOffer = !this.isPolite && offerCollision;
         if (entry.ignoreOffer) {
           console.log(
-            `[WebRTC Call] Impolite peer ignoring offer collision from ${peerId}, signalingState=${pc.signalingState}`
+            `[WebRTC VideoCall] Impolite peer ignoring offer collision from ${peerId}, signalingState=${pc.signalingState}`
           );
           return;
         }
 
         if (offerCollision && this.isPolite) {
           console.log(
-            `[WebRTC Call] Polite peer rolling back on offer collision from ${peerId}, signalingState=${pc.signalingState}`
+            `[WebRTC VideoCall] Polite peer rolling back on offer collision from ${peerId}, signalingState=${pc.signalingState}`
           );
           await Promise.all([
             pc.setLocalDescription({ type: 'rollback' }),
@@ -785,13 +771,13 @@ export class CallManager {
         }
 
         console.log(
-          `[WebRTC Call] setRemoteDescription success (${description.type}) from ${peerId}, signalingState=${pc.signalingState}`
+          `[WebRTC VideoCall] setRemoteDescription success (${description.type}) from ${peerId}, signalingState=${pc.signalingState}`
         );
 
         // Process queued ICE candidates that arrived before remoteDescription was set
         if (entry.iceCandidateQueue.length > 0) {
           console.log(
-            `[WebRTC Call] Draining ${entry.iceCandidateQueue.length} queued ICE candidate(s) for ${peerId}`
+            `[WebRTC VideoCall] Draining ${entry.iceCandidateQueue.length} queued ICE candidate(s) for ${peerId}`
           );
           while (entry.iceCandidateQueue.length > 0) {
             const cand = entry.iceCandidateQueue.shift();
@@ -799,7 +785,7 @@ export class CallManager {
               try {
                 await pc.addIceCandidate(cand);
               } catch (e) {
-                console.warn('[WebRTC Call] Error adding queued ICE candidate:', e);
+                console.warn('[WebRTC VideoCall] Error adding queued ICE candidate:', e);
               }
             }
           }
@@ -808,7 +794,7 @@ export class CallManager {
         if (description.type === 'offer') {
           await pc.setLocalDescription();
           console.log(
-            `[WebRTC Call] Answer created & local description set for ${peerId}, signalingState=${pc.signalingState}`
+            `[WebRTC VideoCall] Answer created & local description set for ${peerId}, signalingState=${pc.signalingState}`
           );
           if (pc.localDescription) {
             this.callbacks.onSendSignal(peerId, {
@@ -823,20 +809,20 @@ export class CallManager {
       } else if (signal.type === 'candidate') {
         const candidate = signal.candidate;
         if (!pc.remoteDescription || !pc.remoteDescription.type) {
-          console.log(`[WebRTC Call] Queueing ICE candidate for ${peerId} before remoteDescription is set`);
+          console.log(`[WebRTC VideoCall] Queueing ICE candidate for ${peerId} before remoteDescription is set`);
           entry.iceCandidateQueue.push(candidate);
         } else {
           try {
             await pc.addIceCandidate(candidate);
           } catch (err) {
             if (!entry.ignoreOffer) {
-              console.warn('[WebRTC Call] Error adding ICE candidate:', err);
+              console.warn('[WebRTC VideoCall] Error adding ICE candidate:', err);
             }
           }
         }
       }
     } catch (err) {
-      console.error(`[WebRTC Call] Error handling signal from ${peerId}:`, err);
+      console.error(`[WebRTC VideoCall] Error handling signal from ${peerId}:`, err);
     }
   }
 
@@ -921,55 +907,27 @@ export class CallManager {
     }
   }
 
-  private async applyCameraConstraints(width: number, height: number, frameRate: number) {
-    if (!this.localStream) return;
-    const videoTrack = this.localStream.getVideoTracks()[0];
-    if (videoTrack && typeof videoTrack.applyConstraints === 'function') {
-      try {
-        await videoTrack.applyConstraints({
-          width: { ideal: width },
-          height: { ideal: height },
-          frameRate: { ideal: frameRate, max: frameRate },
-        });
-      } catch (err) {
-        console.warn('Failed to apply camera constraints:', err);
-      }
-    }
-  }
-
   private applyBandwidthLimitsToPC(pc: RTCPeerConnection) {
+    const cfg = QUALITY_CONFIG[this.quality];
+
     try {
       const senders = pc.getSenders();
       for (const sender of senders) {
         if (sender.track?.kind === 'video') {
-          sender.track.contentHint = 'motion';
           const params = sender.getParameters();
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          params.encodings[0].maxBitrate = this.poorNetwork ? 200_000 : 400_000;
-          params.encodings[0].maxFramerate = this.poorNetwork ? 15 : 24;
-          params.encodings[0].scaleResolutionDownBy = 1;
-          params.degradationPreference = 'maintain-framerate';
+          params.encodings[0].maxBitrate = cfg.maxBitrate;
+          params.encodings[0].maxFramerate = cfg.maxFps;
+          params.encodings[0].scaleResolutionDownBy = cfg.scaleDown;
           sender.setParameters(params).catch(() => {});
-          try {
-            if (typeof (sender as any).generateKeyFrame === 'function') {
-              (sender as any).generateKeyFrame();
-            } else if (sender.track) {
-              const enabled = sender.track.enabled;
-              sender.track.enabled = !enabled;
-              setTimeout(() => { if (sender.track) sender.track.enabled = enabled; }, 50);
-            }
-          } catch {}
         } else if (sender.track?.kind === 'audio') {
-          sender.track.contentHint = 'speech';
           const params = sender.getParameters();
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
           params.encodings[0].maxBitrate = 32_000;
-          params.encodings[0].priority = 'high';
-          (params.encodings[0] as any).networkPriority = 'high';
           sender.setParameters(params).catch(() => {});
         }
       }
@@ -1102,59 +1060,33 @@ export class CallManager {
     if (this.stutterInterval) return;
 
     this.consecutiveBadStats = 0;
-    this.goodStatsCounter = 0;
-
     this.stutterInterval = window.setInterval(async () => {
       if (!this.inCall || this.peerConnections.size === 0) return;
-
-      const isDebug = () => typeof window !== 'undefined' && window.location.search.includes('debug=1');
 
       for (const entry of this.peerConnections.values()) {
         try {
           const stats = await entry.pc.getStats();
           let packetsLost = 0;
           let packetsSent = 0;
-          let fps = 24;
-          let jitter = 0;
-          let rtt = 0;
 
           stats.forEach((report) => {
             if (report.type === 'outbound-rtp' && report.kind === 'video') {
               packetsSent += report.packetsSent || 0;
-              fps = report.framesPerSecond || fps;
             }
             if (report.type === 'remote-inbound-rtp' && report.kind === 'video') {
               packetsLost += report.packetsLost || 0;
-              jitter = report.jitter || 0;
-              rtt = report.roundTripTime || 0;
             }
           });
 
-          if (isDebug()) {
-            console.log(`[call stats] fps: ${fps}, packetsLost: ${packetsLost}, jitter: ${Math.round(jitter * 1000)}ms, rtt: ${Math.round(rtt * 1000)}ms`);
-          }
-
-          const lossRate = packetsSent > 0 ? packetsLost / (packetsLost + packetsSent) : 0;
-          if (lossRate > 0.05 || fps < 12) {
-            this.consecutiveBadStats++;
-            this.goodStatsCounter = 0;
-            if (this.consecutiveBadStats >= 2 && !this.poorNetwork) {
-              this.poorNetwork = true;
-              console.warn('[call quality guard] Poor network detected (loss > 5% or fps < 12). Stepping down camera to 320x180, 15fps, 200kbps.');
-              this.applyBandwidthLimits();
-              this.applyCameraConstraints(320, 180, 15);
-            }
-          } else {
-            this.consecutiveBadStats = Math.max(0, this.consecutiveBadStats - 1);
-            if (this.poorNetwork) {
-              this.goodStatsCounter++;
-              if (this.goodStatsCounter >= 10) {
-                this.poorNetwork = false;
-                this.goodStatsCounter = 0;
-                console.info('[call quality guard] Good network stats for 30s. Stepping back up to 640x360, 24fps, 400kbps.');
-                this.applyBandwidthLimits();
-                this.applyCameraConstraints(CALL_WIDTH, CALL_HEIGHT, CALL_FPS);
+          if (packetsSent > 100) {
+            const lossRate = packetsLost / (packetsLost + packetsSent);
+            if (lossRate > 0.05) {
+              this.consecutiveBadStats++;
+              if (this.consecutiveBadStats >= 2 && !this.bandwidthSaver) {
+                this.callbacks.onStutterWarning(true);
               }
+            } else {
+              this.consecutiveBadStats = Math.max(0, this.consecutiveBadStats - 1);
             }
           }
         } catch {}

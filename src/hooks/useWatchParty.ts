@@ -1167,6 +1167,17 @@ export function useWatchParty(options?: {
     };
   }, []);
 
+  const [pausePlaybackWhileSendingState, setPausePlaybackWhileSendingState] = useState<boolean>(() => {
+    return fileTransferManager.getPausePlaybackWhileSending();
+  });
+  const [isPreparingTransfer, setIsPreparingTransfer] = useState<boolean>(false);
+  const [hashingProgress, setHashingProgress] = useState<{ current: number; total: number } | null>(null);
+
+  const setPausePlaybackWhileSending = useCallback((val: boolean) => {
+    fileTransferManager.setPausePlaybackWhileSending(val);
+    setPausePlaybackWhileSendingState(val);
+  }, []);
+
   const startFileTransfer = useCallback(
     async (file: File) => {
       const guestIds = watchPartyService.getGuestPeerIds();
@@ -1176,7 +1187,23 @@ export function useWatchParty(options?: {
         el.pause();
         broadcastCurrentState();
       }
-      await fileTransferManager.startHostFileTransfer(file, guestIds, peer, el?.duration);
+      setIsPreparingTransfer(true);
+      setHashingProgress({ current: 0, total: Math.ceil(file.size / 1048576) });
+      try {
+        await fileTransferManager.startHostFileTransfer(
+          file,
+          guestIds,
+          peer,
+          el?.duration,
+          (prog) => setHashingProgress(prog)
+        );
+      } catch (err) {
+        console.error('[WatchParty] Failed to start file transfer:', err);
+        throw err;
+      } finally {
+        setIsPreparingTransfer(false);
+        setHashingProgress(null);
+      }
     },
     [getMediaElement, broadcastCurrentState]
   );
@@ -1292,8 +1319,9 @@ export function useWatchParty(options?: {
     revertToLiveStream,
     activateProgressivePlayback,
     sendBuffering,
-    pausePlaybackWhileSending: fileTransferManager.getPausePlaybackWhileSending(),
-    setPausePlaybackWhileSending: (val: boolean) =>
-      fileTransferManager.setPausePlaybackWhileSending(val),
+    pausePlaybackWhileSending: pausePlaybackWhileSendingState,
+    setPausePlaybackWhileSending,
+    isPreparingTransfer,
+    hashingProgress,
   };
 }

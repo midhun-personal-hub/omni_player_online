@@ -1074,7 +1074,8 @@ export class FileTransferManager {
     file: File,
     guestPeerIds: string[],
     peer: any,
-    mediaDuration?: number
+    mediaDuration?: number,
+    onHashingProgress?: (progress: { current: number; total: number }) => void
   ) {
     this.hostFile = file;
 
@@ -1088,6 +1089,10 @@ export class FileTransferManager {
       const end = Math.min(file.size, start + TRANSFER_PIECE_SIZE);
       const slice = await file.slice(start, end).arrayBuffer();
       pieceHashes[i] = await computeBufferHash(slice);
+      if (onHashingProgress && (i % 25 === 0 || i === pieceCount - 1)) {
+        onHashingProgress({ current: i + 1, total: pieceCount });
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
     const fullFileHash = await computeCombinedFullHash(pieceHashes, pieceCount);
 
