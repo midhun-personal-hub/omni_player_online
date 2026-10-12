@@ -15,6 +15,7 @@ export type WatchPartyCommand =
   | {
       type: 'heartbeat';
       timestamp: number;
+      sentAt?: number;
       isPlaying: boolean;
       currentTime: number;
       duration: number;
@@ -25,6 +26,7 @@ export type WatchPartyCommand =
     }
   | {
       type: 'state';
+      sentAt?: number;
       isPlaying: boolean;
       currentTime: number;
       duration: number;
@@ -125,7 +127,7 @@ export type WatchPartyCommand =
       peerId: string;
       name: string;
     }
-  | { type: 'manifest'; fingerprint: string; name: string; size: number; type: string; duration: number; pieceSize: number; pieceCount: number; pieceHashes: string[] }
+  | { type: 'manifest'; fingerprint: string; name: string; size: number; mimeType: string; duration: number; pieceSize: number; pieceCount: number; pieceHashes: string[] }
   | { type: 'have'; fingerprint: string; bitmap: boolean[] }
   | { type: 'have-all'; fingerprint: string }
   | { type: 'piece-start'; index: number; size: number; hash: string }
@@ -135,7 +137,10 @@ export type WatchPartyCommand =
   | { type: 'priority'; indices: number[] }
   | { type: 'buffering'; progress: number; bufferedSeconds: number }
   | { type: 'ready' }
-  | { type: 'done' };
+  | { type: 'done' }
+  | { type: 'guest-buffering'; progress: number; bufferedSeconds: number; name?: string }
+  | { type: 'guest-ready'; name?: string }
+  | { type: 'party-signal'; kind: string; senderId: string; targetId: string; signal: unknown };
 
 export interface WatchPartyStateBroadcast {
   isPlaying: boolean;
@@ -373,6 +378,7 @@ export class WatchPartyService {
   private friendLeftListeners: Set<(peerId: string) => void> = new Set();
   private cameraCallListeners: Set<(call: MediaConnection) => void> = new Set();
   private rosterListeners: Set<(peers: Array<{ id: string; name: string }>) => void> = new Set();
+  private fileConnectionListeners: Set<(conn: DataConnection) => void> = new Set();
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -617,6 +623,11 @@ export class WatchPartyService {
     return () => this.rosterListeners.delete(cb);
   }
 
+  public onFileTransferConnection(cb: (conn: DataConnection) => void): () => void {
+    this.fileConnectionListeners.add(cb);
+    return () => this.fileConnectionListeners.delete(cb);
+  }
+
   public setHostDisplayName(name: string) {
     this.hostDisplayName = name;
     if (this.role === 'host') {
@@ -739,6 +750,7 @@ export class WatchPartyService {
           return;
         }
         this.fileDataConnections.set(conn.peer, conn);
+        this.fileConnectionListeners.forEach((cb) => cb(conn));
       });
       conn.on('data', (data) => {
         const cmd = data as WatchPartyCommand;
@@ -878,6 +890,9 @@ export class WatchPartyService {
                 reliable: true,
               });
               this.guestFileConn = fileConn;
+              fileConn.on('open', () => {
+                this.fileConnectionListeners.forEach((cb) => cb(fileConn));
+              });
               fileConn.on('data', (data) => {
                 const cmd = data as WatchPartyCommand;
                 this.commandListeners.forEach((cb) => cb(cmd, hostPeerId));
@@ -1169,6 +1184,14 @@ export class WatchPartyService {
     this.clientNames.clear();
     this.setStatus('idle');
     this.setViewerCount(0);
+  }
+
+  public notifyCallState(..._args: unknown[]) {}
+  public connectToMeshPeer(..._args: unknown[]) {}
+  public setSourceDimensions(..._args: unknown[]) {}
+  public handleIncomingMovieSignal(..._args: unknown[]) {}
+  public getGuestPeerIds(): string[] {
+    return Array.from(this.dataConnections.keys());
   }
 
   public closeRoom(): void {

@@ -15,6 +15,7 @@ import {
   RemoteParticipant,
   CallQuality,
   CallDevices,
+  CallSignal,
 } from '../utils/callManager';
 import { fileTransferManager, TransferProgress } from '../utils/fileTransfer';
 import { movieStore } from '../utils/movieStore';
@@ -576,7 +577,7 @@ export function useWatchParty(options?: {
           mediaName: cmd.mediaName,
           isAudio: cmd.isAudio,
           allowGuestControl: cmd.allowGuestControl,
-          sentAt: cmd.sentAt || cmd.timestamp || Date.now(),
+          sentAt: cmd.sentAt || ('timestamp' in cmd ? cmd.timestamp : undefined) || Date.now(),
         });
       } else if (cmd.type === 'guest-buffering') {
         if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
@@ -831,10 +832,10 @@ export function useWatchParty(options?: {
             if (cmd.targetId && cmd.targetId !== watchPartyService.getMyPeerId()) {
               watchPartyService.sendToPeer(cmd.targetId, cmd);
             } else {
-              callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal);
+              callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal as CallSignal);
             }
           } else {
-            callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal);
+            callManagerRef.current?.handleIncomingSignal(senderId, cmd.signal as CallSignal);
           }
         } else {
           if (roleRef.current === 'host' || watchPartyService.getRole() === 'host') {
@@ -1239,10 +1240,19 @@ export function useWatchParty(options?: {
   const sendBuffering = useCallback(
     (isBuffering: boolean) => {
       const myName = getSavedDisplayName() || 'Guest';
-      watchPartyService.sendCommand({
-        type: isBuffering ? 'guest-buffering' : 'guest-ready',
-        name: myName,
-      });
+      if (isBuffering) {
+        watchPartyService.sendCommand({
+          type: 'guest-buffering',
+          progress: 0,
+          bufferedSeconds: 0,
+          name: myName,
+        });
+      } else {
+        watchPartyService.sendCommand({
+          type: 'guest-ready',
+          name: myName,
+        });
+      }
     },
     [getSavedDisplayName]
   );
